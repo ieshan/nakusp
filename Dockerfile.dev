@@ -1,0 +1,11 @@
+FROM golang:1.25.3-trixie
+
+RUN apt update
+
+RUN apt install -y redis-tools
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+
+RUN go mod download
