@@ -2,276 +2,129 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ieshan/nakusp/models"
+	trnspt "github.com/ieshan/nakusp/transports"
 )
 
-type Handler struct {
-	MaxRetry int
-	Func     func(payload string) error
-}
+const (
+	DefaultTransport = "default"
+)
 
-type NakuspConfig struct {
-	MaxWorkers         int
-	DefaultTaskRuntime int
-	Logger             *slog.Logger
-	HeartbeatPeriod    time.Duration
-	GracefulTimeout    time.Duration
-}
-
-type NakuspKeys struct {
-	Lock               string
-	InProgressTasks    string
-	ToDoQueue          string
-	DeadLetterQueue    string
-	InProgressQueue    string
-	TaskInfo           string
-	TaskAttachedWorker string
-	OnlineWorkers      string
-}
-
+// Nakusp is a background job processing system that supports multiple transport layers.
+// It manages a pool of workers to execute jobs asynchronously.
 type Nakusp struct {
-	id       string
-	client   *redis.Client
-	handlers map[string]Handler
-	config   *NakuspConfig
-	jobQueue chan Job
-	wg       sync.WaitGroup
-	Keys     NakuspKeys
+	id                string
+	config            *models.Config
+	handlers          map[string]models.Handler
+	transportHandlers map[string]string
+	lock              *sync.RWMutex
+	wg                sync.WaitGroup
+	jobQueue          chan *models.Job
+	transports        map[string]models.Transport
 }
 
-type Job struct {
-	ID         string
-	Name       string
-	RetryCount int
-	Payload    string
-}
-
-func New(client *redis.Client, config *NakuspConfig) *Nakusp {
+// NewNakusp creates a new Nakusp instance.
+// It takes a configuration and a map of transports. If either is nil, it uses default values.
+func NewNakusp(config *models.Config, transports map[string]models.Transport) *Nakusp {
 	if config == nil {
-		config = &NakuspConfig{
-			MaxWorkers:         10,
+		config = &models.Config{
+			MaxWorkers:         5,
 			DefaultTaskRuntime: 600,
-			Logger:             slog.New(slog.NewJSONHandler(os.Stdout, nil)),
 			HeartbeatPeriod:    time.Minute * 5,
 			GracefulTimeout:    time.Second * 5,
 		}
 	}
-	workerId := uuid.NewString()
+	if transports == nil {
+		transports = map[string]models.Transport{
+			DefaultTransport: trnspt.NewFake(),
+		}
+	}
 	return &Nakusp{
-		id:       workerId,
-		client:   client,
-		handlers: make(map[string]Handler),
-		config:   config,
-		jobQueue: make(chan Job, config.MaxWorkers),
-		wg:       sync.WaitGroup{},
-		Keys: NakuspKeys{
-			Lock:               fmt.Sprintf("nakusp:worker:%s:lock", workerId),
-			InProgressTasks:    fmt.Sprintf("nakusp:worker:%s:workers", workerId),
-			ToDoQueue:          "nakusp:queue:todo",
-			DeadLetterQueue:    "nakusp:queue:dlq",
-			InProgressQueue:    "nakusp:queue:doing",
-			TaskInfo:           "nakusp:tasks",
-			TaskAttachedWorker: "nakusp:task:attached",
-			OnlineWorkers:      "nakusp:workers",
-		},
+		id:                RandomID(),
+		config:            config,
+		handlers:          make(map[string]models.Handler),
+		transportHandlers: make(map[string]string),
+		lock:              &sync.RWMutex{},
+		wg:                sync.WaitGroup{},
+		jobQueue:          make(chan *models.Job, config.MaxWorkers),
+		transports:        transports,
 	}
 }
 
+// ID returns the unique identifier for the Nakusp worker instance.
 func (n *Nakusp) ID() string {
 	return n.id
 }
 
-func (n *Nakusp) Publish(ctx context.Context, jobName, payload string) (Job, error) {
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       jobName,
-		RetryCount: 0,
+// AddHandler registers a handler for a given task name.
+func (n *Nakusp) AddHandler(taskName string, handler models.Handler) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	n.handlers[taskName] = handler
+}
+
+// Publish sends a new job to the appropriate transport based on the task name.
+// If no specific transport is registered for the task, it uses the default transport.
+func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) error {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+
+	transportName, ok := n.transportHandlers[taskName]
+	if !ok {
+		transportName = DefaultTransport
+	}
+	return n.transports[transportName].Publish(ctx, &models.Job{
+		ID:         RandomID(),
+		Name:       taskName,
 		Payload:    payload,
-	}
-	_, err := n.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.HSet(ctx, n.Keys.TaskInfo, job.ID, n.GetPayload(job))
-		pipe.RPush(ctx, n.Keys.ToDoQueue, job.ID)
-		return nil
+		RetryCount: 0,
 	})
-	return job, err
 }
 
-func (n *Nakusp) GetPayload(job Job) string {
-	return fmt.Sprintf("%s:%s:%d:%s", job.ID, job.Name, job.RetryCount, job.Payload)
-}
+// StartWorker begins the job processing loop for a given transport.
+// It listens for jobs and executes them in separate goroutines.
+func (n *Nakusp) StartWorker(transportName string) error {
+	n.lock.RLock()
+	transport := n.transports[transportName]
+	n.lock.RUnlock()
 
-func (n *Nakusp) Add(taskName string, maxRetry int, handlerFunc func(payload string) error) error {
-	n.handlers[taskName] = Handler{
-		MaxRetry: maxRetry,
-		Func:     handlerFunc,
-	}
-	return nil
-}
-
-func (n *Nakusp) RunUntilCancelled(ctx context.Context, handlerFn func(context.Context) (time.Duration, error)) {
-	defer n.wg.Done()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			duration, err := handlerFn(ctx)
-			if err != nil {
-				n.config.Logger.Error("error in RunUntilCancelled", slog.String("error", err.Error()))
-			}
-			time.Sleep(duration)
-		}
-	}
-}
-
-func (n *Nakusp) Heartbeat(ctx context.Context) (time.Duration, error) {
-	_, err := n.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.HSetNX(ctx, n.Keys.OnlineWorkers, n.id, n.id)
-		pipe.HExpire(ctx, n.Keys.OnlineWorkers, time.Duration(n.config.DefaultTaskRuntime)*time.Second, n.id)
-		return nil
-	})
-	if err != nil {
-		return n.config.HeartbeatPeriod, err
-	}
-
-	return n.config.HeartbeatPeriod, nil
-}
-
-func (n *Nakusp) ProcessCompleted(ctx context.Context, job Job) error {
-	_, err := n.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Decr(ctx, n.Keys.InProgressTasks)
-		pipe.LRem(ctx, n.Keys.InProgressQueue, 1, job.ID)
-		pipe.HDel(ctx, n.Keys.TaskInfo, job.ID)
-		pipe.HDel(ctx, n.Keys.TaskAttachedWorker, job.ID)
-		return nil
-	})
-	return err
-}
-
-func (n *Nakusp) RequeueJob(ctx context.Context, job Job) error {
-	// Increase retry count
-
-	_, err := n.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Decr(ctx, n.Keys.InProgressTasks)
-		pipe.RPush(ctx, n.Keys.ToDoQueue, job.ID)
-		pipe.LRem(ctx, n.Keys.InProgressQueue, 1, job.ID)
-		pipe.HSet(ctx, n.Keys.TaskInfo, job.ID, n.GetPayload(job))
-		pipe.HDel(ctx, n.Keys.TaskAttachedWorker, job.ID)
-		return nil
-	})
-	return err
-}
-
-func (n *Nakusp) SendToDLQ(ctx context.Context, job Job) error {
-	_, err := n.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Decr(ctx, n.Keys.InProgressTasks)
-		pipe.RPush(ctx, n.Keys.DeadLetterQueue, n.GetPayload(job))
-		pipe.LRem(ctx, n.Keys.InProgressQueue, 1, job.ID)
-		pipe.HDel(ctx, n.Keys.TaskInfo, job.ID)
-		pipe.HDel(ctx, n.Keys.TaskAttachedWorker, job.ID)
-		return nil
-	})
-	return err
-}
-
-func (n *Nakusp) ExecuteJob(ctx context.Context, job Job) error {
-	var err error
-	var redisErr error
-
-	select {
-	case <-ctx.Done():
-		redisErr = n.RequeueJob(ctx, job)
-		return redisErr
-	default:
-		hf, ok := n.handlers[job.Name]
-		if !ok {
-			n.config.Logger.Error("handler not found", slog.String("task", job.Name))
-			return nil
-		}
-
-		err = hf.Func(job.Payload)
-		if err != nil {
-			if job.RetryCount < hf.MaxRetry {
-				job.RetryCount++
-				redisErr = n.RequeueJob(ctx, job)
-			} else {
-				redisErr = n.SendToDLQ(ctx, job)
-			}
-		} else {
-			redisErr = n.ProcessCompleted(ctx, job)
-		}
-		return redisErr
-	}
-}
-
-func (n *Nakusp) FetchAndLock(ctx context.Context) (time.Duration, error) {
-	duration := time.Second
-	tasks, err := fetchTasks.Run(
-		ctx,
-		n.client,
-		[]string{
-			n.Keys.Lock,
-			n.Keys.InProgressTasks,
-			n.Keys.ToDoQueue,
-			n.Keys.InProgressQueue,
-			n.Keys.TaskInfo,
-			n.Keys.TaskAttachedWorker,
-		},
-		[]interface{}{
-			n.id,
-			n.config.MaxWorkers,
-			n.config.DefaultTaskRuntime,
-		},
-	).StringSlice()
-	if err != nil {
-		return duration, err
-	}
-
-	for _, task := range tasks {
-		parts := strings.Split(task, ":")
-		n.jobQueue <- Job{
-			ID:      parts[0],
-			Name:    parts[1],
-			Payload: parts[2],
-		}
-	}
-	return time.Duration(n.config.MaxWorkers-len(tasks)) * time.Second, nil
-}
-
-func (n *Nakusp) StartWorker() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGABRT, syscall.SIGKILL, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGABRT, syscall.SIGTERM)
 
 	n.wg.Add(2)
-	go n.RunUntilCancelled(ctx, n.Heartbeat)
-	go n.RunUntilCancelled(ctx, n.FetchAndLock)
+	go n.RunUntilCancelled(ctx, transport.Heartbeat)
+	go n.RunUntilCancelled(
+		ctx,
+		func(ctx context.Context, id string) error {
+			return transport.Fetch(ctx, id, n.jobQueue)
+		},
+	)
 
 	for {
 		select {
 		case job := <-n.jobQueue:
 			n.wg.Add(1)
-			go func(job Job) {
+			go func(job *models.Job) {
 				defer n.wg.Done()
-				if err := n.ExecuteJob(ctx, job); err != nil {
-					n.config.Logger.Error("job execution error", slog.String("error", err.Error()))
+				if err := n.ExecuteJob(ctx, transport, job); err != nil {
+					slog.Error("job execution error", slog.Any("error", err))
 				}
 			}(job)
 		case <-sigChan:
-			n.config.Logger.Debug("got exit signal")
+			slog.Debug("got exit signal in StartWorker")
 			cancel()
 			n.wg.Wait()
 			close(n.jobQueue)
@@ -280,57 +133,54 @@ func (n *Nakusp) StartWorker() error {
 	}
 }
 
-var fetchTasks = redis.NewScript(`
-local lock_key = KEYS[1]
-local in_progress_tasks = KEYS[2]
-local todo_queue = KEYS[3]
-local in_progress_queue = KEYS[4]
-local task_info_hash = KEYS[5]
-local attached_worker_hash = KEYS[6]
+// RunUntilCancelled is a helper function that runs a given handler function until the context is cancelled.
+// The handler is responsible for honouring the context (including any pacing or blocking behaviour).
+func (n *Nakusp) RunUntilCancelled(ctx context.Context, handlerFn func(context.Context, string) error) {
+	defer n.wg.Done()
 
-local worker_id = ARGV[1]
-local max_tasks = tonumber(ARGV[2])
-local task_runtime = ARGV[3]
-local tasks = {}
-
-local function getTaskId(str)
-	local pos = str:find(":", 1)
-	if not pos then
+	select {
+	case <-ctx.Done():
 		return
-	end
-	return str:sub(1, str:find(":", 1) - 1)
-end
+	default:
+	}
 
--- If we can acquire lock, execute the logic
-if redis.call("SET", lock_key, "1", "NX", "EX", 10) then
-	local task_len = redis.call("SET", in_progress_tasks, "0", "NX", "GET")
-	if not task_len then
-		task_len = 0
-	else
-		task_len = tonumber(task_len)
-	end
-	if task_len < max_tasks then
-		local lock_incr = 0
-		for i = 1, max_tasks - task_len do
-			local task_id = redis.call("LMOVE", todo_queue, in_progress_queue, "RIGHT", "RIGHT")
-			if task_id then
-				lock_incr = lock_incr + 1
-				redis.log(redis.LOG_NOTICE, "task_info_hash", task_info_hash, "task_id", task_id)
-				local task = redis.call("HGET", task_info_hash, task_id)
-				table.insert(tasks, task)
-				--local task_id = getTaskId(task)
-				redis.call("HSET", attached_worker_hash, task_id, worker_id)
-				redis.call("HEXPIRE", attached_worker_hash, task_runtime, "FIELDS", 1, task_id)
-			end
-		end
+	if err := handlerFn(ctx, n.id); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		slog.Error(
+			"error in RunUntilCancelled",
+			slog.Any("error", err),
+		)
+	}
+}
 
-		if lock_incr > 0 then
-			redis.call("INCRBY", in_progress_tasks, lock_incr)
-		end
-	end
-	-- release lock
-	redis.call("DEL", lock_key)
-end
+// ExecuteJob processes a single job. It finds the appropriate handler and executes it.
+// It handles retries, and moving jobs to the DLQ based on the handler's outcome.
+func (n *Nakusp) ExecuteJob(ctx context.Context, transport models.Transport, job *models.Job) error {
+	n.lock.RLock()
+	hf, ok := n.handlers[job.Name]
+	n.lock.RUnlock()
 
-return tasks
-`)
+	var err error
+	if !ok {
+		err = fmt.Errorf("handler '%s' not found", job.Name)
+		slog.Error("error in ExecuteJob", slog.Any("error", err))
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return transport.Requeue(ctx, job)
+	default:
+		err = hf.Func(job)
+		if err != nil {
+			if job.RetryCount < hf.MaxRetry {
+				job.RetryCount++
+				err = transport.Requeue(ctx, job)
+			} else {
+				err = transport.SendToDLQ(ctx, job)
+			}
+		} else {
+			err = transport.Completed(ctx, job)
+		}
+		return err
+	}
+}

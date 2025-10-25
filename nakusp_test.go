@@ -3,498 +3,198 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
-	"os"
 	"testing"
+	"time"
+
+	"github.com/ieshan/nakusp/models"
+	"github.com/ieshan/nakusp/transports"
 )
 
-func getClient(t *testing.T) *redis.Client {
-	opt, err := redis.ParseURL(os.Getenv("REDIS_URI"))
-	if err != nil {
-		t.Errorf("error was not expected in client: %s", err)
-	}
-	return redis.NewClient(opt)
-}
+func newTestNakusp2(t *testing.T) (*Nakusp, *transports.FakeTransport) {
+	t.Helper()
 
-func redisTeardown(client *redis.Client) {
-	client.FlushAll(context.TODO())
-}
-
-func addInProgressTestJob(client *redis.Client, n *Nakusp, job Job) error {
-	ctx := context.TODO()
-	_, err := client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Set(ctx, n.Keys.InProgressTasks, 1, redis.KeepTTL)
-		pipe.LPush(ctx, n.Keys.InProgressQueue, job.ID)
-		pipe.HSet(ctx, n.Keys.TaskInfo, job.ID, n.GetPayload(job))
-		pipe.HSet(ctx, n.Keys.TaskAttachedWorker, job.ID, n.id)
-		return nil
+	fakeTransport := transports.NewFake()
+	n := NewNakusp(nil, map[string]models.Transport{
+		DefaultTransport: fakeTransport,
 	})
-	return err
+
+	return n, fakeTransport
 }
 
-func TestPublish(t *testing.T) {
-	client := getClient(t)
+func TestNakusp2PublishAddsJobToDefaultTransport(t *testing.T) {
+	ctx := context.Background()
 
-	ctx := context.TODO()
-	n := New(client, nil)
-	job, err := n.Publish(ctx, "test", "test")
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
+	n, fakeTransport := newTestNakusp2(t)
 
-	payload, err := client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if payload != n.GetPayload(job) {
-		t.Errorf("payload mismatched")
-	}
-	actualJobId, err := client.LPop(ctx, n.Keys.ToDoQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if actualJobId != job.ID {
-		t.Errorf("job id mismatched, expected: %s, got: %s", job.ID, actualJobId)
+	if err := n.Publish(ctx, "test-task", "payload"); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
 	}
 
-	redisTeardown(client)
+	jobQueue := make(chan *models.Job, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		if err := fakeTransport.Fetch(ctx, n.ID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Fetch returned an unexpected error: %v", err)
+		}
+	}()
+
+	select {
+	case job := <-jobQueue:
+		if job.Name != "test-task" {
+			t.Fatalf("expected job name 'test-task', got %s", job.Name)
+		}
+		if job.Payload != "payload" {
+			t.Fatalf("expected payload 'payload', got %s", job.Payload)
+		}
+		if job.RetryCount != 0 {
+			t.Fatalf("expected retry count 0, got %d", job.RetryCount)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected job in queue after publish, but timed out")
+	}
 }
 
-func TestHeartbeat(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
+func TestNakusp2ExecuteJobCompleted(t *testing.T) {
+	ctx := context.Background()
 
-	_, err := n.Heartbeat(ctx)
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
+	n, fakeTransport := newTestNakusp2(t)
+
+	handler := models.Handler{
+		MaxRetry: 1,
+		Func: func(job *models.Job) error {
+			return nil
+		},
+	}
+	n.AddHandler("test-task", handler)
+
+	job := &models.Job{
+		ID:      RandomID(),
+		Name:    "test-task",
+		Payload: "payload",
+	}
+	if err := fakeTransport.Publish(ctx, job); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
 	}
 
-	workerId, err := client.HGet(ctx, n.Keys.OnlineWorkers, n.id).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if workerId != n.id {
-		t.Errorf("worker id mismatched, expected: %s, got: %s", n.id, workerId)
+	if err := n.ExecuteJob(ctx, fakeTransport, job); err != nil {
+		t.Fatalf("ExecuteJob returned error: %v", err)
 	}
 
-	redisTeardown(client)
+	jobQueue := make(chan *models.Job, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		if err := fakeTransport.Fetch(ctx, n.ID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Fetch returned an unexpected error: %v", err)
+		}
+	}()
+
+	select {
+	case <-jobQueue:
+		t.Fatal("expected no jobs after completion")
+	case <-time.After(100 * time.Millisecond):
+		// Expected timeout, as no job should be fetched
+	}
 }
 
-func TestProcessCompleted(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
+func TestNakusp2ExecuteJobRequeueOnError(t *testing.T) {
+	ctx := context.Background()
 
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       "test",
-		RetryCount: 0,
-		Payload:    "test",
-	}
-	if err := addInProgressTestJob(client, n, job); err != nil {
-		t.Errorf("error was not expected in creating in-progress test job: %s", err)
-	}
+	n, fakeTransport := newTestNakusp2(t)
 
-	err := n.ProcessCompleted(ctx, job)
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
+	handler := models.Handler{
+		MaxRetry: 2,
+		Func: func(job *models.Job) error {
+			return errors.New("requeue")
+		},
 	}
+	n.AddHandler("test-task", handler)
 
-	numInProgressTasks, err := client.Get(ctx, n.Keys.InProgressTasks).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if numInProgressTasks != "0" {
-		t.Errorf("number of in progress tasks mismatched, expected: 0, got: %s", numInProgressTasks)
+	job := &models.Job{
+		ID:      RandomID(),
+		Name:    "test-task",
+		Payload: "payload",
 	}
 
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 0 {
-		t.Errorf("in progress count mismatched, expected: 0, got: %d", inProgressCount)
+	if err := n.ExecuteJob(ctx, fakeTransport, job); err != nil {
+		t.Fatalf("ExecuteJob returned error: %v", err)
 	}
 
-	_, err = client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
+	if job.RetryCount != 1 {
+		t.Fatalf("expected retry count to increment to 1, got %d", job.RetryCount)
 	}
 
-	_, err = client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
+	jobQueue := make(chan *models.Job, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		if err := fakeTransport.Fetch(ctx, n.ID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Fetch returned an unexpected error: %v", err)
+		}
+	}()
 
-	redisTeardown(client)
+	select {
+	case fetched := <-jobQueue:
+		if fetched.ID != job.ID {
+			t.Fatalf("expected requeued job ID %s, got %s", job.ID, fetched.ID)
+		}
+		if fetched.RetryCount != 1 {
+			t.Fatalf("expected requeued job retry count 1, got %d", fetched.RetryCount)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected job to be requeued, but timed out")
+	}
 }
 
-func TestRequeueFailedJob(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
+func TestNakusp2ExecuteJobSendToDLQAtMaxRetry(t *testing.T) {
+	ctx := context.Background()
 
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       "test",
-		RetryCount: 0,
-		Payload:    "test",
-	}
-	if err := addInProgressTestJob(client, n, job); err != nil {
-		t.Errorf("error was not expected in creating in-progress test job: %s", err)
-	}
+	n, fakeTransport := newTestNakusp2(t)
 
-	err := n.RequeueJob(ctx, job)
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
+	handler := models.Handler{
+		MaxRetry: 1,
+		Func: func(job *models.Job) error {
+			return errors.New("dlq")
+		},
 	}
+	n.AddHandler("test-task", handler)
 
-	numInProgressTasks, err := client.Get(ctx, n.Keys.InProgressTasks).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if numInProgressTasks != "0" {
-		t.Errorf("number of in progress tasks mismatched, expected: 0, got: %s", numInProgressTasks)
-	}
-
-	actualJobId, err := client.LPop(ctx, n.Keys.ToDoQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if actualJobId != job.ID {
-		t.Errorf("job id mismatched, expected: %s, got: %s", job.ID, actualJobId)
-	}
-
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 0 {
-		t.Errorf("in progress count mismatched, expected: 0, got: %d", inProgressCount)
-	}
-
-	taskInfo, err := client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if taskInfo != n.GetPayload(job) {
-		t.Errorf("task info mismatched, expected: %s, got: %s", n.GetPayload(job), taskInfo)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	redisTeardown(client)
-}
-
-func TestSendToDLQ(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
-
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       "test",
-		RetryCount: 0,
-		Payload:    "test",
-	}
-	if err := addInProgressTestJob(client, n, job); err != nil {
-		t.Errorf("error was not expected in creating in-progress test job: %s", err)
-	}
-
-	if err := n.SendToDLQ(ctx, job); err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	numInProgressTasks, err := client.Get(ctx, n.Keys.InProgressTasks).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if numInProgressTasks != "0" {
-		t.Errorf("number of in progress tasks mismatched, expected: 0, got: %s", numInProgressTasks)
-	}
-
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 0 {
-		t.Errorf("in progress count mismatched, expected: 0, got: %d", inProgressCount)
-	}
-
-	dlqCount, err := client.LLen(ctx, n.Keys.DeadLetterQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if dlqCount != 1 {
-		t.Errorf("in progress count mismatched, expected: 1, got: %d", dlqCount)
-	}
-
-	payload := n.GetPayload(job)
-	actualPayload, err := client.LPop(ctx, n.Keys.DeadLetterQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if actualPayload != payload {
-		t.Errorf("payload mismatched, expected: %s, got: %s", payload, actualPayload)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	redisTeardown(client)
-}
-
-func TestExecuteJobRequeueIfJobFailed(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
-
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       "test",
-		RetryCount: 0,
-		Payload:    "test",
-	}
-	if err := addInProgressTestJob(client, n, job); err != nil {
-		t.Errorf("error was not expected in creating in-progress test job: %s", err)
-	}
-
-	_ = n.Add("test", 1, func(payload string) error {
-		return errors.New("test error")
-	})
-	if err := n.ExecuteJob(ctx, job); err != nil {
-		t.Errorf("error was not expected during job execution: %s", err)
-	}
-
-	numInProgressTasks, err := client.Get(ctx, n.Keys.InProgressTasks).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if numInProgressTasks != "0" {
-		t.Errorf("number of in progress tasks mismatched, expected: 0, got: %s", numInProgressTasks)
-	}
-
-	actualJobId, err := client.LPop(ctx, n.Keys.ToDoQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if actualJobId != job.ID {
-		t.Errorf("job id mismatched, expected: %s, got: %s", job.ID, actualJobId)
-	}
-
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 0 {
-		t.Errorf("in progress count mismatched, expected: 0, got: %d", inProgressCount)
-	}
-
-	taskInfo, err := client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	retryPayload := n.GetPayload(Job{
-		ID:         job.ID,
-		Name:       job.Name,
+	job := &models.Job{
+		ID:         RandomID(),
+		Name:       "test-task",
+		Payload:    "payload",
 		RetryCount: 1,
-		Payload:    job.Payload,
-	})
-	if taskInfo != retryPayload {
-		t.Errorf("task info mismatched, expected: %s, got: %s", retryPayload, taskInfo)
+	}
+	if err := fakeTransport.Publish(ctx, job); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
 	}
 
-	_, err = client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
+	if err := n.ExecuteJob(ctx, fakeTransport, job); err != nil {
+		t.Fatalf("ExecuteJob returned error: %v", err)
 	}
 
-	redisTeardown(client)
-}
+	jobQueue := make(chan *models.Job, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		if err := fakeTransport.Fetch(ctx, n.ID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Fetch returned an unexpected error: %v", err)
+		}
+	}()
 
-func TestExecuteJobSendToDLQIfMaxRetry(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
-
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       "test",
-		RetryCount: 1,
-		Payload:    "test",
-	}
-	if err := addInProgressTestJob(client, n, job); err != nil {
-		t.Errorf("error was not expected in creating in-progress test job: %s", err)
+	select {
+	case <-jobQueue:
+		t.Fatal("expected no jobs after sending to DLQ")
+	case <-time.After(100 * time.Millisecond):
+		// Expected timeout, as no job should be fetched
 	}
 
-	_ = n.Add("test", 1, func(payload string) error {
-		return errors.New("test error")
-	})
-	if err := n.ExecuteJob(ctx, job); err != nil {
-		t.Errorf("error was not expected during job execution: %s", err)
+	if len(fakeTransport.Dlq) != 1 {
+		t.Fatalf("expected 1 job in DLQ, got %d", len(fakeTransport.Dlq))
 	}
 
-	numInProgressTasks, err := client.Get(ctx, n.Keys.InProgressTasks).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
+	if fakeTransport.Dlq[0].ID != job.ID {
+		t.Fatalf("expected job %s in DLQ, got %s", job.ID, fakeTransport.Dlq[0].ID)
 	}
-	if numInProgressTasks != "0" {
-		t.Errorf("number of in progress tasks mismatched, expected: 0, got: %s", numInProgressTasks)
-	}
-
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 0 {
-		t.Errorf("in progress count mismatched, expected: 0, got: %d", inProgressCount)
-	}
-
-	dlqCount, err := client.LLen(ctx, n.Keys.DeadLetterQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if dlqCount != 1 {
-		t.Errorf("in progress count mismatched, expected: 1, got: %d", dlqCount)
-	}
-
-	payload := n.GetPayload(job)
-	actualPayload, err := client.LPop(ctx, n.Keys.DeadLetterQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if actualPayload != payload {
-		t.Errorf("payload mismatched, expected: %s, got: %s", payload, actualPayload)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	redisTeardown(client)
-}
-
-func TestExecuteJobCompleteJobIfSuccessful(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
-
-	job := Job{
-		ID:         uuid.NewString(),
-		Name:       "test",
-		RetryCount: 1,
-		Payload:    "test",
-	}
-	if err := addInProgressTestJob(client, n, job); err != nil {
-		t.Errorf("error was not expected in creating in-progress test job: %s", err)
-	}
-
-	_ = n.Add("test", 1, func(payload string) error {
-		return nil
-	})
-	if err := n.ExecuteJob(ctx, job); err != nil {
-		t.Errorf("error was not expected during job execution: %s", err)
-	}
-
-	numInProgressTasks, err := client.Get(ctx, n.Keys.InProgressTasks).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if numInProgressTasks != "0" {
-		t.Errorf("number of in progress tasks mismatched, expected: 0, got: %s", numInProgressTasks)
-	}
-
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 0 {
-		t.Errorf("in progress count mismatched, expected: 0, got: %d", inProgressCount)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	_, err = client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if !errors.Is(err, redis.Nil) {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	redisTeardown(client)
-}
-
-func TestFetchAndLock(t *testing.T) {
-	client := getClient(t)
-	ctx := context.TODO()
-	n := New(client, nil)
-
-	job, err := n.Publish(ctx, "test", "test")
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	if _, err := n.FetchAndLock(ctx); err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	inProgressCount, err := client.LLen(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if inProgressCount != 1 {
-		t.Errorf("to do count mismatched, expected: 1, got: %d", inProgressCount)
-	}
-
-	actualJobId, err := client.LPop(ctx, n.Keys.InProgressQueue).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if actualJobId != job.ID {
-		t.Errorf("job id mismatched, expected: %s, got: %s", job.ID, actualJobId)
-	}
-
-	taskInfo, err := client.HGet(ctx, n.Keys.TaskInfo, job.ID).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-
-	expectedPayload := n.GetPayload(Job{
-		ID:         job.ID,
-		Name:       job.Name,
-		RetryCount: 0,
-		Payload:    job.Payload,
-	})
-	if taskInfo != expectedPayload {
-		t.Errorf("task info mismatched, expected: %s, got: %s", expectedPayload, taskInfo)
-	}
-
-	workerId, err := client.HGet(ctx, n.Keys.TaskAttachedWorker, job.ID).Result()
-	if err != nil {
-		t.Errorf("error was not expected: %s", err)
-	}
-	if workerId != n.ID() {
-		t.Errorf("worker id mismatched, expected: %s, got: %s", n.ID(), workerId)
-	}
-
-	redisTeardown(client)
 }

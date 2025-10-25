@@ -7,7 +7,7 @@ import (
 )
 
 // FakeTransport is an in-memory transport for Nakusp, used primarily for testing.
-// It simulates the behavior of a real transport without any external dependencies.
+// It simulates the behavior of real transport without any external dependencies.
 type FakeTransport struct {
 	Jobs []*models.Job
 	Dlq  []*models.Job
@@ -24,12 +24,13 @@ func (t *FakeTransport) Publish(_ context.Context, job *models.Job) error {
 	return nil
 }
 
-// Heartbeat is a no-op for the fake transport.
-func (t *FakeTransport) Heartbeat(_ context.Context, _ string) error {
-	return nil
+// Heartbeat blocks until the context is cancelled, mirroring long-running transports.
+func (t *FakeTransport) Heartbeat(ctx context.Context, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
-// Fetch sends all jobs in the in-memory queue to the job channel.
+// Fetch continually drains the in-memory queue, waiting briefly when no jobs are available.
 func (t *FakeTransport) Fetch(_ context.Context, _ string, jobQueue chan *models.Job) error {
 	for _, job := range t.Jobs {
 		jobQueue <- job

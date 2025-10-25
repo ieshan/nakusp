@@ -6,11 +6,48 @@ Nakusp is a flexible and extensible background job processing system written in 
 
 The system is composed of two main components:
 
-*   **Nakusp2**: The core worker that manages job execution. It fetches jobs from a transport, processes them in a pool of goroutines, and handles retries and failures.
-*   **Transports**: Pluggable modules that provide the queuing mechanism. Nakusp comes with three built-in transports:
-    *   **FakeTransport**: An in-memory transport for testing purposes.
-    *   **RedisTransport**: A production-ready transport that uses Redis lists and hashes.
-    *   **SQLiteTransport**: A persistent transport that uses a SQLite database.
+*   **Nakusp Core**: The orchestrator that manages job execution. It launches transport-specific processes (like fetching and heartbeating) and maintains a pool of goroutines to execute jobs as they arrive. The core delegates loop control to transports, allowing each transport to manage its own polling cadence and execution rhythm.
+
+*   **Transports**: Pluggable modules that implement the `Transport` interface and provide the queuing mechanism. Each transport is responsible for:
+    *   Managing its own long-running processes (Heartbeat and Fetch methods)
+    *   Controlling polling intervals and execution cadence
+    *   Handling graceful shutdown via context cancellation
+    *   Ensuring atomic operations for job state transitions
+
+### Built-in Transports
+
+Nakusp comes with three production-ready transports:
+
+*   **FakeTransport**: An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
+
+*   **RedisTransport**: A production-grade transport using Redis lists and Lua scripts for atomic operations. Features include:
+    *   Atomic job fetching with distributed locking
+    *   Worker heartbeat tracking with automatic expiration
+    *   Configurable polling intervals (200ms default for fetching)
+    *   Support for Dead Letter Queue (DLQ) for failed jobs
+
+*   **SQLiteTransport**: A persistent transport using SQLite for local job storage. Features include:
+    *   Transaction-based job locking to prevent duplicate processing
+    *   Configurable heartbeat (30s) and fetch (250ms) intervals
+    *   Automatic job expiration and worker health monitoring
+    *   Suitable for single-node deployments or development environments
+
+### Transport Interface
+
+All transports must implement the following interface:
+
+```go
+type Transport interface {
+    Publish(ctx context.Context, job *Job) error
+    Heartbeat(ctx context.Context, id string) error  // Blocks until context cancelled
+    Fetch(ctx context.Context, id string, jobQueue chan *Job) error  // Blocks until context cancelled
+    Requeue(ctx context.Context, job *Job) error
+    SendToDLQ(ctx context.Context, job *Job) error
+    Completed(ctx context.Context, job *Job) error
+}
+```
+
+The `Heartbeat` and `Fetch` methods are designed to run as long-lived goroutines, blocking until the context is cancelled. This design allows each transport to control its own execution cadence without requiring the core system to manage timing logic.
 
 ## Getting Started
 
@@ -58,8 +95,8 @@ import (
 )
 
 func main() {
-	// Create a new Nakusp2 instance with default settings
-	n := NewNakusp2(nil, nil)
+	// Create a new Nakusp instance with default settings
+	n := NewNakusp(nil, nil)
 
 	// Define a handler for a task
 	handler := models.Handler{
