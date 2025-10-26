@@ -103,9 +103,9 @@ func (t *SQLiteTransport) Heartbeat(ctx context.Context, id string) error {
 	}
 }
 
-// Fetch retrieves a batch of jobs from the queue and assigns them to a worker.
+// Consume retrieves a batch of jobs from the queue and assigns them to a worker.
 // It locks the jobs to prevent other workers from processing them.
-func (t *SQLiteTransport) Fetch(ctx context.Context, id string, jobQueue chan *models.Job) error {
+func (t *SQLiteTransport) Consume(ctx context.Context, id string, jobQueue chan *models.Job) error {
 	ticker := time.NewTicker(t.config.FetchInterval)
 	defer ticker.Stop()
 
@@ -210,4 +210,45 @@ func (t *SQLiteTransport) SendToDLQ(ctx context.Context, job *models.Job) error 
 func (t *SQLiteTransport) Completed(ctx context.Context, job *models.Job) error {
 	_, err := t.db.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", job.ID)
 	return err
+}
+
+// ConsumeAll consumes all jobs from the queue and sends them to the job channel.
+// It fetches all jobs with 'queued' status, sends them to the jobQueue, and then closes the channel.
+// The method respects context cancellation and will stop processing if the context is cancelled.
+func (t *SQLiteTransport) ConsumeAll(ctx context.Context, _ string, jobQueue chan *models.Job) error {
+	defer close(jobQueue)
+
+	rows, err := t.db.QueryContext(ctx, "SELECT id, name, payload, retry_count FROM jobs WHERE status = 'queued' ORDER BY created_at ASC")
+	if err != nil {
+		return fmt.Errorf("failed to query jobs: %w", err)
+	}
+
+	for rows.Next() {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var job models.Job
+		if err = rows.Scan(&job.ID, &job.Name, &job.Payload, &job.RetryCount); err != nil {
+			return fmt.Errorf("failed to scan job: %w", err)
+		}
+
+		select {
+		case jobQueue <- &job:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("error iterating over rows: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("error closing rows: %w", err)
+	}
+
+	return nil
 }

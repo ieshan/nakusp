@@ -60,9 +60,12 @@ type Transport interface {
 	// This method should block until the context is cancelled.
 	Heartbeat(ctx context.Context, id string) error
 
-	// Fetch runs in a loop, continuously retrieving jobs from the queue and sending them to jobQueue.
+	// ConsumeAll consumes all jobs from the queue and cancels the jobQueue channel after all jobs are consumed.
+	ConsumeAll(ctx context.Context, id string, jobQueue chan *Job) error
+
+	// Consume runs in a loop, continuously retrieving jobs from the queue and sending them to jobQueue.
 	// This method should block until the context is cancelled.
-	Fetch(ctx context.Context, id string, jobQueue chan *Job) error
+	Consume(ctx context.Context, id string, jobQueue chan *Job) error
 
 	// Requeue moves a failed job back to the queue for retry.
 	Requeue(ctx context.Context, job *Job) error

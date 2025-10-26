@@ -90,6 +90,39 @@ func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) e
 	})
 }
 
+// ConsumeAll consumes all jobs from the specified transport and processes them.
+// It starts a consumer goroutine that fetches all jobs and puts them into the job queue.
+// It then waits for all jobs to be processed by the workers before returning.
+func (n *Nakusp) ConsumeAll(transportName string) error {
+	n.lock.RLock()
+	transport := n.transports[transportName]
+	n.lock.RUnlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Use a channel to receive the error from the consumer goroutine
+	errChan := make(chan error, 1)
+
+	go func() {
+		errChan <- transport.ConsumeAll(ctx, n.id, n.jobQueue)
+	}()
+
+	for j := range n.jobQueue {
+		n.wg.Add(1)
+		go func(job *models.Job) {
+			defer n.wg.Done()
+			if err := n.ExecuteJob(ctx, transport, job); err != nil {
+				slog.Error("job execution error", slog.Any("error", err))
+			}
+		}(j)
+	}
+	n.wg.Wait()
+
+	// Get the error from the consumer goroutine
+	return <-errChan
+}
+
 // StartWorker begins the job processing loop for a given transport.
 // It listens for jobs and executes them in separate goroutines.
 func (n *Nakusp) StartWorker(transportName string) error {
@@ -109,7 +142,7 @@ func (n *Nakusp) StartWorker(transportName string) error {
 	go n.RunUntilCancelled(
 		ctx,
 		func(ctx context.Context, id string) error {
-			return transport.Fetch(ctx, id, n.jobQueue)
+			return transport.Consume(ctx, id, n.jobQueue)
 		},
 	)
 

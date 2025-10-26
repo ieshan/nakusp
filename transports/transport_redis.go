@@ -104,10 +104,10 @@ func (t *RedisTransport) sendHeartbeat(ctx context.Context, id string) error {
 	return err
 }
 
-// Fetch retrieves jobs from the 'todo' queue using a Lua script for atomicity.
+// Consume retrieves jobs from the 'todo' queue using a Lua script for atomicity.
 // It continuously polls for jobs and sends them to the jobQueue channel.
 // The method blocks until the context is cancelled.
-func (t *RedisTransport) Fetch(ctx context.Context, id string, jobQueue chan *models.Job) error {
+func (t *RedisTransport) Consume(ctx context.Context, id string, jobQueue chan *models.Job) error {
 	const fetchInterval = 200 * time.Millisecond
 	ticker := time.NewTicker(fetchInterval)
 	defer ticker.Stop()
@@ -136,6 +136,32 @@ func (t *RedisTransport) Fetch(ctx context.Context, id string, jobQueue chan *mo
 		case <-ticker.C:
 		}
 	}
+}
+
+// ConsumeAll fetches all available jobs from the 'todo' queue and sends them to the jobQueue.
+// It continues to fetch jobs until the queue is empty, and then closes the jobQueue channel.
+func (t *RedisTransport) ConsumeAll(ctx context.Context, id string, jobQueue chan *models.Job) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		fetched, err := t.fetchAndProcessTasks(ctx, id, jobQueue)
+		if err != nil {
+			return err
+		}
+
+		// If jobs were fetched, continue immediately to check for more
+		if fetched > 0 {
+			continue
+		} else {
+			break
+		}
+	}
+	close(jobQueue)
+	return nil
 }
 
 // fetchAndProcessTasks fetches jobs from Redis and sends them to the job queue.

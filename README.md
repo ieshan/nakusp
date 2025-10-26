@@ -6,10 +6,10 @@ Nakusp is a flexible and extensible background job processing system written in 
 
 The system is composed of two main components:
 
-*   **Nakusp Core**: The orchestrator that manages job execution. It launches transport-specific processes (like fetching and heartbeating) and maintains a pool of goroutines to execute jobs as they arrive. The core delegates loop control to transports, allowing each transport to manage its own polling cadence and execution rhythm.
+*   **Nakusp Core**: The orchestrator that manages job execution. It launches transport-specific processes (like consuming and heartbeating) and maintains a pool of goroutines to execute jobs as they arrive. The core delegates loop control to transports, allowing each transport to manage its own polling cadence and execution rhythm.
 
 *   **Transports**: Pluggable modules that implement the `Transport` interface and provide the queuing mechanism. Each transport is responsible for:
-    *   Managing its own long-running processes (Heartbeat and Fetch methods)
+    *   Managing its own long-running processes (Heartbeat and Consume methods)
     *   Controlling polling intervals and execution cadence
     *   Handling graceful shutdown via context cancellation
     *   Ensuring atomic operations for job state transitions
@@ -21,14 +21,14 @@ Nakusp comes with three production-ready transports:
 *   **FakeTransport**: An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
 
 *   **RedisTransport**: A production-grade transport using Redis lists and Lua scripts for atomic operations. Features include:
-    *   Atomic job fetching with distributed locking
+    *   Atomic job consuming with distributed locking
     *   Worker heartbeat tracking with automatic expiration
-    *   Configurable polling intervals (200ms default for fetching)
+    *   Configurable polling intervals (200ms default for consuming)
     *   Support for Dead Letter Queue (DLQ) for failed jobs
 
 *   **SQLiteTransport**: A persistent transport using SQLite for local job storage. Features include:
     *   Transaction-based job locking to prevent duplicate processing
-    *   Configurable heartbeat (30s) and fetch (250ms) intervals
+    *   Configurable heartbeat (30s) and consume (250ms) intervals
     *   Automatic job expiration and worker health monitoring
     *   Suitable for single-node deployments or development environments
 
@@ -40,14 +40,17 @@ All transports must implement the following interface:
 type Transport interface {
     Publish(ctx context.Context, job *Job) error
     Heartbeat(ctx context.Context, id string) error  // Blocks until context cancelled
-    Fetch(ctx context.Context, id string, jobQueue chan *Job) error  // Blocks until context cancelled
+    Consume(ctx context.Context, id string, jobQueue chan *Job) error  // Blocks until context cancelled
+    ConsumeAll(ctx context.Context, id string, jobQueue chan *Job) error
     Requeue(ctx context.Context, job *Job) error
     SendToDLQ(ctx context.Context, job *Job) error
     Completed(ctx context.Context, job *Job) error
 }
 ```
 
-The `Heartbeat` and `Fetch` methods are designed to run as long-lived goroutines, blocking until the context is cancelled. This design allows each transport to control its own execution cadence without requiring the core system to manage timing logic.
+The `Heartbeat` and `Consume` methods are designed to run as long-lived goroutines, blocking until the context is cancelled. This design allows each transport to control its own execution cadence without requiring the core system to manage timing logic.
+
+The `ConsumeAll` method is designed for batch processing scenarios where you want to process all currently queued jobs and then exit. Unlike `Consume`, which runs continuously, `ConsumeAll` fetches all available jobs, sends them to the job queue, closes the channel, and returns once all jobs have been processed.
 
 ## Getting Started
 
@@ -91,12 +94,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ieshan/nakusp"
 	"github.com/ieshan/nakusp/models"
 )
 
 func main() {
 	// Create a new Nakusp instance with default settings
-	n := NewNakusp(nil, nil)
+	n := nakusp.NewNakusp(nil, nil)
 
 	// Define a handler for a task
 	handler := models.Handler{
@@ -111,7 +115,7 @@ func main() {
 	n.AddHandler("my-task", handler)
 
 	// Start a worker
-	go n.StartWorker(DefaultTransport)
+	go n.StartWorker(nakusp.DefaultTransport)
 
 	// Publish a job
 	if err := n.Publish(context.Background(), "my-task", "hello, world!"); err != nil {
@@ -120,6 +124,52 @@ func main() {
 
 	// Wait for the job to be processed
 	time.Sleep(1 * time.Second)
+}
+```
+
+### Consuming All Jobs
+
+The `ConsumeAll` method allows you to process all jobs in a queue and then exit. This is useful for batch processing or for running jobs as part of a script.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/ieshan/nakusp"
+	"github.com/ieshan/nakusp/models"
+)
+
+func main() {
+	// Create a new Nakusp instance with default settings
+	n := nakusp.NewNakusp(nil, nil)
+
+	// Define a handler for a task
+	handler := models.Handler{
+		MaxRetry: 3,
+		Func: func(job *models.Job) error {
+			fmt.Printf("Processing job %s with payload: %s\n", job.ID, job.Payload)
+			return nil
+		},
+	}
+
+	// Register the handler
+	n.AddHandler("my-task", handler)
+
+	// Publish some jobs
+	if err := n.Publish(context.Background(), "my-task", "hello, world!"); err != nil {
+		panic(err)
+	}
+	if err := n.Publish(context.Background(), "my-task", "another job"); err != nil {
+		panic(err)
+	}
+
+	// Consume all jobs and exit
+	if err := n.ConsumeAll(nakusp.DefaultTransport); err != nil {
+		panic(err)
+	}
 }
 ```
 
