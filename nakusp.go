@@ -39,7 +39,6 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 		config = &models.Config{
 			MaxWorkers:         5,
 			DefaultTaskRuntime: 600,
-			HeartbeatPeriod:    time.Minute * 5,
 			GracefulTimeout:    time.Second * 5,
 		}
 	}
@@ -130,7 +129,7 @@ func (n *Nakusp) StartWorker(transportName string) error {
 	transport := n.transports[transportName]
 	n.lock.RUnlock()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), n.config.GracefulTimeout)
 	defer cancel()
 
 	// Signal handling for graceful shutdown

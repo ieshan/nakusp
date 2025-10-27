@@ -19,9 +19,10 @@ func (nt *nakuspTest) setup(t *testing.T) {
 	t.Helper()
 
 	nt.fakeTransport = transports.NewFake()
-	nt.n = NewNakusp(nil, map[string]models.Transport{
-		DefaultTransport: nt.fakeTransport,
-	})
+	nt.n = NewNakusp(
+		&models.Config{MaxWorkers: 5, DefaultTaskRuntime: 600, GracefulTimeout: time.Second},
+		map[string]models.Transport{DefaultTransport: nt.fakeTransport},
+	)
 }
 
 func TestNakusp(t *testing.T) {

@@ -252,3 +252,8 @@ func (t *SQLiteTransport) ConsumeAll(ctx context.Context, _ string, jobQueue cha
 
 	return nil
 }
+
+// Close closes the transport
+func (t *SQLiteTransport) Close(_ context.Context) error {
+	return t.db.Close()
+}

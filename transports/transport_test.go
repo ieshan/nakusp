@@ -36,7 +36,7 @@ func TestTransport(t *testing.T) {
 			}
 			client := redis.NewClient(opt)
 			// Flush all keys before each test to ensure clean state
-			if err := client.FlushAll(context.Background()).Err(); err != nil {
+			if err = client.FlushAll(context.Background()).Err(); err != nil {
 				t.Fatalf("failed to flush redis: %v", err)
 			}
 			return NewRedis(client, nil, nil)

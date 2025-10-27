@@ -253,6 +253,11 @@ func (t *RedisTransport) Completed(ctx context.Context, job *models.Job) error {
 	return err
 }
 
+// Close closes the transport
+func (t *RedisTransport) Close(_ context.Context) error {
+	return nil
+}
+
 var fetchTasks = redis.NewScript(`
 local lock_key = KEYS[1]
 local in_progress_tasks = KEYS[2]

@@ -14,9 +14,6 @@ type Config struct {
 	// DefaultTaskRuntime is the default timeout in seconds for a task execution.
 	DefaultTaskRuntime int
 
-	// HeartbeatPeriod is the interval at which workers send heartbeats to indicate they're alive.
-	HeartbeatPeriod time.Duration
-
 	// GracefulTimeout is the duration to wait for graceful shutdown before forcing termination.
 	GracefulTimeout time.Duration
 }
@@ -70,9 +67,12 @@ type Transport interface {
 	// Requeue moves a failed job back to the queue for retry.
 	Requeue(ctx context.Context, job *Job) error
 
+	// Completed marks a job as successfully completed and removes it from the queue.
+	Completed(ctx context.Context, job *Job) error
+
 	// SendToDLQ moves a job to the Dead Letter Queue after it has exceeded its retry limit.
 	SendToDLQ(ctx context.Context, job *Job) error
 
-	// Completed marks a job as successfully completed and removes it from the queue.
-	Completed(ctx context.Context, job *Job) error
+	// Close closes the transport and releases any resources.
+	Close(ctx context.Context) error
 }

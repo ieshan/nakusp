@@ -93,3 +93,8 @@ func (t *FakeTransport) Completed(_ context.Context, job *models.Job) error {
 	t.removeJob(job.ID)
 	return nil
 }
+
+// Close closes the transport
+func (t *FakeTransport) Close(_ context.Context) error {
+	return nil
+}
