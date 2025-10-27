@@ -216,3 +216,13 @@ func (n *Nakusp) ExecuteJob(ctx context.Context, transport models.Transport, job
 		return err
 	}
 }
+
+// Close closes all transports and releases any resources.
+func (n *Nakusp) Close(ctx context.Context) error {
+	for _, transport := range n.transports {
+		if err := transport.Close(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
