@@ -37,20 +37,30 @@ func (t *FakeTransport) Heartbeat(ctx context.Context, _ string) error {
 
 // Consume continually drains the in-memory queue, waiting briefly when no jobs are available.
 func (t *FakeTransport) Consume(ctx context.Context, _ string, jobQueue chan *models.Job) error {
-	t.mu.Lock()
-	jobs := make([]*models.Job, len(t.Jobs))
-	copy(jobs, t.Jobs)
-	t.Jobs = nil
-	t.mu.Unlock()
-
-	for _, job := range jobs {
+	for {
 		select {
-		case jobQueue <- job:
 		case <-ctx.Done():
 			return ctx.Err()
+		default:
+			t.mu.Lock()
+			if len(t.Jobs) > 0 {
+				jobs := make([]*models.Job, len(t.Jobs))
+				copy(jobs, t.Jobs)
+				t.Jobs = nil
+				t.mu.Unlock()
+
+				for _, job := range jobs {
+					select {
+					case jobQueue <- job:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+			} else {
+				t.mu.Unlock()
+			}
 		}
 	}
-	return nil
 }
 
 // ConsumeAll sends all jobs from the in-memory queue to the jobQueue and then closes the channel.

@@ -2,6 +2,15 @@
 
 Nakusp is a flexible and extensible background job processing system written in Go. It is designed to be transport-agnostic, allowing you to choose the backend that best fits your needs, whether it's an in-memory queue for testing, a robust Redis-based queue for production, or a persistent SQLite database.
 
+## Features
+
+- **Multiple Transport Backends**: Choose from in-memory (FakeTransport), Redis, or SQLite
+- **Scheduled Tasks**: Built-in cron-like scheduling with efficient timer-based execution
+- **Retry Logic**: Configurable retry counts with automatic Dead Letter Queue (DLQ) support
+- **Graceful Shutdown**: Signal-based shutdown with configurable timeout
+- **Concurrent Processing**: Worker pool with configurable concurrency
+- **Type-Safe**: Strongly typed job handlers and configuration
+
 ## Architecture
 
 The system is composed of two main components:
@@ -126,6 +135,94 @@ func main() {
 	time.Sleep(1 * time.Second)
 }
 ```
+
+### Scheduled Tasks
+
+Nakusp supports scheduling tasks to run at regular intervals. The scheduler uses a smart timer-based approach that efficiently handles multiple tasks with different intervals using a single timer.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/ieshan/nakusp"
+	"github.com/ieshan/nakusp/models"
+)
+
+func main() {
+	// Create a new Nakusp instance
+	n := nakusp.NewNakusp(nil, nil)
+
+	// Define handlers for different tasks
+	cleanupHandler := models.Handler{
+		MaxRetry: 3,
+		Func: func(job *models.Job) error {
+			fmt.Println("Running cleanup task...")
+			// Perform cleanup logic
+			return nil
+		},
+	}
+
+	healthCheckHandler := models.Handler{
+		MaxRetry: 1,
+		Func: func(job *models.Job) error {
+			fmt.Println("Running health check...")
+			// Perform health check logic
+			return nil
+		},
+	}
+
+	// Register handlers
+	n.AddHandler("cleanup-task", cleanupHandler)
+	n.AddHandler("health-check", healthCheckHandler)
+
+	// Schedule tasks with different intervals
+	if err := n.AddSchedule("cleanup-task", 1*time.Hour); err != nil {
+		panic(err)
+	}
+	if err := n.AddSchedule("health-check", 30*time.Second); err != nil {
+		panic(err)
+	}
+
+	// Start the worker (scheduler will start automatically)
+	go func() {
+		if err := n.StartWorker(nakusp.DefaultTransport); err != nil {
+			fmt.Printf("Worker error: %v\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	fmt.Println("Shutting down...")
+}
+```
+
+#### How Scheduling Works
+
+The scheduler uses an efficient timer-based algorithm:
+
+1. **Single Timer**: Instead of creating multiple tickers (one per task), the scheduler uses a single `time.Timer` that always waits for the next soonest task.
+
+2. **Dynamic Recalculation**: After each timer fires, the scheduler:
+   - Executes all tasks whose scheduled time has arrived
+   - Calculates the next execution time for each executed task
+   - Re-sorts tasks by their next execution time
+   - Resets the timer for the soonest upcoming task
+
+3. **Catch-up Logic**: If a task execution takes longer than expected, the scheduler automatically catches up by scheduling the next execution relative to the current time rather than falling further behind.
+
+4. **Graceful Shutdown**: The scheduler respects context cancellation and properly cleans up the timer on shutdown.
+
+This approach is more efficient than using multiple tickers, especially when dealing with many tasks with different intervals, as it minimizes the number of goroutines and timer resources.
 
 ### Consuming All Jobs
 
