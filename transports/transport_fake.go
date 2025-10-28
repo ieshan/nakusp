@@ -64,10 +64,24 @@ func (t *FakeTransport) Consume(ctx context.Context, _ string, jobQueue chan *mo
 }
 
 // ConsumeAll sends all jobs from the in-memory queue to the jobQueue and then closes the channel.
-func (t *FakeTransport) ConsumeAll(ctx context.Context, id string, jobQueue chan *models.Job) error {
-	err := t.Consume(ctx, id, jobQueue)
+func (t *FakeTransport) ConsumeAll(ctx context.Context, _ string, jobQueue chan *models.Job) error {
+	t.mu.Lock()
+	jobs := make([]*models.Job, len(t.Jobs))
+	copy(jobs, t.Jobs)
+	t.Jobs = nil
+	t.mu.Unlock()
+
+	for _, job := range jobs {
+		select {
+		case jobQueue <- job:
+		case <-ctx.Done():
+			close(jobQueue)
+			return ctx.Err()
+		}
+	}
+
 	close(jobQueue)
-	return err
+	return nil
 }
 
 // Requeue adds a job back to the in-memory queue.
