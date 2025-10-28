@@ -27,7 +27,7 @@ type Nakusp struct {
 	handlers          map[string]models.Handler
 	transportHandlers map[string]string
 	lock              *sync.RWMutex
-	wg                sync.WaitGroup
+	wg                *sync.WaitGroup
 	jobQueue          chan *models.Job
 	transports        map[string]models.Transport
 	schedules         map[string]time.Duration
@@ -54,7 +54,7 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 		handlers:          make(map[string]models.Handler),
 		transportHandlers: make(map[string]string),
 		lock:              &sync.RWMutex{},
-		wg:                sync.WaitGroup{},
+		wg:                &sync.WaitGroup{},
 		jobQueue:          make(chan *models.Job, config.MaxWorkers),
 		transports:        transports,
 		schedules:         make(map[string]time.Duration),
@@ -97,6 +97,7 @@ func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) e
 func (n *Nakusp) ConsumeAll(transportName string) error {
 	n.lock.RLock()
 	transport := n.transports[transportName]
+	n.wg = &sync.WaitGroup{}
 	n.lock.RUnlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
