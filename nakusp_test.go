@@ -3,6 +3,7 @@ package nakusp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -77,7 +78,9 @@ func TestNakusp(t *testing.T) {
 				return nil
 			},
 		}
-		nt.n.AddHandler("test-task", handler)
+		if err := nt.n.AddHandler("test-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		job := &models.Job{
 			ID:      RandomID(),
@@ -121,7 +124,9 @@ func TestNakusp(t *testing.T) {
 				return errors.New("requeue")
 			},
 		}
-		nt.n.AddHandler("test-task", handler)
+		if err := nt.n.AddHandler("test-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		job := &models.Job{
 			ID:      RandomID(),
@@ -171,7 +176,9 @@ func TestNakusp(t *testing.T) {
 				return errors.New("dlq")
 			},
 		}
-		nt.n.AddHandler("test-task", handler)
+		if err := nt.n.AddHandler("test-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		job := &models.Job{
 			ID:         RandomID(),
@@ -226,7 +233,9 @@ func TestNakusp(t *testing.T) {
 				return nil
 			},
 		}
-		nt.n.AddHandler("test-task", handler)
+		if err := nt.n.AddHandler("test-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		jobs := []*models.Job{
 			{ID: "1", Name: "test-task", Payload: "payload1"},
@@ -268,7 +277,9 @@ func TestNakusp(t *testing.T) {
 				return nil
 			},
 		}
-		nt.n.AddHandler("test-task", handler)
+		if err := nt.n.AddHandler("test-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		// Start worker in background
 		go func() {
@@ -304,7 +315,9 @@ func TestNakusp(t *testing.T) {
 				return nil
 			},
 		}
-		nt.n.AddHandler("scheduled-task", handler)
+		if err := nt.n.AddHandler("scheduled-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		// Add schedule with short interval for testing
 		if err := nt.n.AddSchedule("scheduled-task", 100*time.Millisecond); err != nil {
@@ -365,20 +378,20 @@ func TestNakusp(t *testing.T) {
 				return nil
 			},
 		}
-
-		nt.n.AddHandler("task-50ms", handler1)
-		nt.n.AddHandler("task-100ms", handler2)
-		nt.n.AddHandler("task-150ms", handler3)
-
-		// Add schedules with different intervals
-		if err := nt.n.AddSchedule("task-50ms", 50*time.Millisecond); err != nil {
-			t.Fatalf("AddSchedule returned error: %v", err)
+		taskTimeWithHandlers := map[int]models.Handler{
+			50:  handler1,
+			100: handler2,
+			150: handler3,
 		}
-		if err := nt.n.AddSchedule("task-100ms", 100*time.Millisecond); err != nil {
-			t.Fatalf("AddSchedule returned error: %v", err)
-		}
-		if err := nt.n.AddSchedule("task-150ms", 150*time.Millisecond); err != nil {
-			t.Fatalf("AddSchedule returned error: %v", err)
+		for taskTime, handler := range taskTimeWithHandlers {
+			taskName := fmt.Sprintf("task-%dms", taskTime)
+			if err := nt.n.AddHandler(taskName, handler); err != nil {
+				t.Fatalf("AddHandler returned error: %v", err)
+			}
+			// Add schedules with different intervals
+			if err := nt.n.AddSchedule(taskName, time.Duration(taskTime)*time.Millisecond); err != nil {
+				t.Fatalf("AddSchedule returned error: %v", err)
+			}
 		}
 
 		// Start worker in background
@@ -473,7 +486,9 @@ func TestNakusp(t *testing.T) {
 				return nil
 			},
 		}
-		nt.n.AddHandler("timer-task", handler)
+		if err := nt.n.AddHandler("timer-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
 
 		if err := nt.n.AddSchedule("timer-task", 30*time.Millisecond); err != nil {
 			t.Fatalf("AddSchedule returned error: %v", err)

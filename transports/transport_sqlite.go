@@ -42,7 +42,7 @@ func NewSQLite(dsn string, config *SQLiteConfig) (*SQLiteTransport, error) {
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS jobs (
 		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
+		name VARCHAR(255) NOT NULL,
 		payload TEXT,
 		retry_count INTEGER NOT NULL,
 		status TEXT NOT NULL,

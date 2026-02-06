@@ -1,33 +1,19 @@
 services:
   nakusp:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    image: nakusp-dev:0.0.1
+    image: golang:1.25.7-trixie
+    working_dir: /app
     volumes:
       - "./:/app"
     networks:
       - nakusp-network
     depends_on:
       - redis
-    command: "go test ./..."
-    stop_signal: SIGINT
-    environment:
-      REDIS_URI: "redis://redis:6379/0"
-  nakusp-test:
-    image: nakusp-dev:0.0.1
-    volumes:
-      - "./:/app"
-    networks:
-      - nakusp-network
-    depends_on:
-      - redis
-    command: "go test ./..."
+    command: ["sh", "-c", "go mod download && go test ./..."]
     stop_signal: SIGINT
     environment:
       REDIS_URI: "redis://redis:6379/0"
   redis:
-    image: redis:8.2.2-alpine3.22
+    image: redis:8.4.0-alpine3.22
     restart: always
     networks:
       - nakusp-network

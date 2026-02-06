@@ -17,6 +17,7 @@ import (
 
 const (
 	DefaultTransport = "default"
+	MaxTaskNameLen   = 250
 )
 
 // Nakusp is a background job processing system that supports multiple transport layers.
@@ -67,10 +68,14 @@ func (n *Nakusp) ID() string {
 }
 
 // AddHandler registers a handler for a given task name.
-func (n *Nakusp) AddHandler(taskName string, handler models.Handler) {
+func (n *Nakusp) AddHandler(taskName string, handler models.Handler) error {
+	if len(taskName) > MaxTaskNameLen {
+		return errors.New("task name is too long")
+	}
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	n.handlers[taskName] = handler
+	return nil
 }
 
 // Publish sends a new job to the appropriate transport based on the task name.
