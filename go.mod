@@ -4,8 +4,8 @@ go 1.25
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/mattn/go-sqlite3 v1.14.32
-	github.com/redis/go-redis/v9 v9.16.0
+	github.com/mattn/go-sqlite3 v1.14.33
+	github.com/redis/go-redis/v9 v9.17.3
 )
 
 require (

@@ -32,7 +32,8 @@ func TestNakusp(t *testing.T) {
 		nt.setup(t)
 		ctx := context.Background()
 
-		if err := nt.n.Publish(ctx, "test-task", "payload"); err != nil {
+		jobId, err := nt.n.Publish(ctx, "test-task", "payload")
+		if err != nil {
 			t.Fatalf("Publish returned error: %v", err)
 		}
 
@@ -41,13 +42,16 @@ func TestNakusp(t *testing.T) {
 		defer cancel()
 
 		go func() {
-			if err := nt.fakeTransport.Consume(consumeCtx, nt.n.ID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) {
+			if err = nt.fakeTransport.Consume(consumeCtx, nt.n.ID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) {
 				t.Errorf("Consume returned an unexpected error: %v", err)
 			}
 		}()
 
 		select {
 		case job := <-jobQueue:
+			if job.ID != jobId {
+				t.Fatalf("expected job ID %s, got %s", jobId, job.ID)
+			}
 			if job.Name != "test-task" {
 				t.Fatalf("expected job name 'test-task', got %s", job.Name)
 			}
@@ -275,7 +279,7 @@ func TestNakusp(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Directly publish a job
-		if err := nt.n.Publish(ctx, "test-task", "payload"); err != nil {
+		if _, err := nt.n.Publish(ctx, "test-task", "payload"); err != nil {
 			t.Fatalf("Publish returned error: %v", err)
 		}
 

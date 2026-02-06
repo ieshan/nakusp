@@ -75,7 +75,7 @@ func (n *Nakusp) AddHandler(taskName string, handler models.Handler) {
 
 // Publish sends a new job to the appropriate transport based on the task name.
 // If no specific transport is registered for the task, it uses the default transport.
-func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) error {
+func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (string, error) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 
@@ -83,8 +83,9 @@ func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) e
 	if !ok {
 		transportName = DefaultTransport
 	}
-	return n.transports[transportName].Publish(ctx, &models.Job{
-		ID:         RandomID(),
+	taskId := RandomID()
+	return taskId, n.transports[transportName].Publish(ctx, &models.Job{
+		ID:         taskId,
 		Name:       taskName,
 		Payload:    payload,
 		RetryCount: 0,
@@ -326,7 +327,7 @@ func (n *Nakusp) runScheduler(ctx context.Context, _ string) error {
 				}
 
 				// Publish the scheduled job
-				if err := n.Publish(ctx, entries[i].name, ""); err != nil &&
+				if _, err := n.Publish(ctx, entries[i].name, ""); err != nil &&
 					!errors.Is(err, context.Canceled) &&
 					!errors.Is(err, context.DeadlineExceeded) {
 					slog.Error(
