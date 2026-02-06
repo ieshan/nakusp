@@ -8,7 +8,7 @@ services:
       - nakusp-network
     depends_on:
       - redis
-    command: ["sh", "-c", "go mod download && go test ./..."]
+    command: ["sh", "-c", "go mod download && go test -v ./..."]
     stop_signal: SIGINT
     environment:
       REDIS_URI: "redis://redis:6379/0"

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ieshan/nakusp/models"
 	trnspt "github.com/ieshan/nakusp/transports"
+	"github.com/oklog/ulid/v2"
 )
 
 const (
@@ -49,8 +50,9 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 			DefaultTransport: trnspt.NewFake(),
 		}
 	}
+
 	return &Nakusp{
-		id:                RandomID(),
+		id:                ulid.Make().String(),
 		config:            config,
 		handlers:          make(map[string]models.Handler),
 		transportHandlers: make(map[string]string),
@@ -88,7 +90,7 @@ func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (
 	if !ok {
 		transportName = DefaultTransport
 	}
-	taskId := RandomID()
+	taskId := ulid.Make().String()
 	return taskId, n.transports[transportName].Publish(ctx, &models.Job{
 		ID:         taskId,
 		Name:       taskName,

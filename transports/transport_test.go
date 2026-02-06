@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ieshan/nakusp/models"
+	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -50,7 +50,7 @@ func TestTransport(t *testing.T) {
 			t.Run("PublishAndConsume", func(t *testing.T) {
 				transport := buildTransport(t)
 				var wg sync.WaitGroup
-				job := &models.Job{ID: uuid.NewString(), Name: "test-job", Payload: "test-payload"}
+				job := &models.Job{ID: ulid.Make().String(), Name: "test-job", Payload: "test-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -80,7 +80,7 @@ func TestTransport(t *testing.T) {
 
 			t.Run("Completed", func(t *testing.T) {
 				transport := buildTransport(t)
-				job := &models.Job{ID: uuid.NewString(), Name: "completed-job", Payload: "completed-payload"}
+				job := &models.Job{ID: ulid.Make().String(), Name: "completed-job", Payload: "completed-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -91,7 +91,7 @@ func TestTransport(t *testing.T) {
 
 			t.Run("Requeue", func(t *testing.T) {
 				transport := buildTransport(t)
-				job := &models.Job{ID: uuid.NewString(), Name: "requeue-job", Payload: "requeue-payload"}
+				job := &models.Job{ID: ulid.Make().String(), Name: "requeue-job", Payload: "requeue-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -102,7 +102,7 @@ func TestTransport(t *testing.T) {
 
 			t.Run("SendToDLQ", func(t *testing.T) {
 				transport := buildTransport(t)
-				job := &models.Job{ID: uuid.NewString(), Name: "dlq-job", Payload: "dlq-payload"}
+				job := &models.Job{ID: ulid.Make().String(), Name: "dlq-job", Payload: "dlq-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -114,9 +114,9 @@ func TestTransport(t *testing.T) {
 			t.Run("ConsumeAll", func(t *testing.T) {
 				transport := buildTransport(t)
 				jobs := []*models.Job{
-					{ID: uuid.NewString(), Name: "job-1", Payload: "payload-1"},
-					{ID: uuid.NewString(), Name: "job-2", Payload: "payload-2"},
-					{ID: uuid.NewString(), Name: "job-3", Payload: "payload-3"},
+					{ID: ulid.Make().String(), Name: "job-1", Payload: "payload-1"},
+					{ID: ulid.Make().String(), Name: "job-2", Payload: "payload-2"},
+					{ID: ulid.Make().String(), Name: "job-3", Payload: "payload-3"},
 				}
 
 				for _, job := range jobs {

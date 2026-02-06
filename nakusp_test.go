@@ -10,6 +10,7 @@ import (
 
 	"github.com/ieshan/nakusp/models"
 	"github.com/ieshan/nakusp/transports"
+	"github.com/oklog/ulid/v2"
 )
 
 type nakuspTest struct {
@@ -83,7 +84,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		job := &models.Job{
-			ID:      RandomID(),
+			ID:      ulid.Make().String(),
 			Name:    "test-task",
 			Payload: "payload",
 		}
@@ -129,7 +130,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		job := &models.Job{
-			ID:      RandomID(),
+			ID:      ulid.Make().String(),
 			Name:    "test-task",
 			Payload: "payload",
 		}
@@ -181,7 +182,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		job := &models.Job{
-			ID:         RandomID(),
+			ID:         ulid.Make().String(),
 			Name:       "test-task",
 			Payload:    "payload",
 			RetryCount: 1,
