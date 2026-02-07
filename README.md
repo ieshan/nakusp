@@ -15,7 +15,7 @@ Nakusp is a flexible and extensible background job processing system written in 
 
 The system is composed of two main components:
 
-*   **Nakusp Core**: The orchestrator that manages job execution. It launches transport-specific processes (like consuming and heartbeating) and maintains a pool of goroutines to execute jobs as they arrive. The core delegates loop control to transports, allowing each transport to manage its own polling cadence and execution rhythm.
+*   **Nakusp Core**: The orchestrator that manages job execution. It launches transport-specific processes (like consuming and heartbeating) and maintains a pool of goroutines to execute jobs as they arrive. The core delegates loop control to transports, allowing each transport to manage its own polling cadence and execution rhythm. Scheduled jobs are published via a single timer-based scheduler.
 
 *   **Transports**: Pluggable modules that implement the `Transport` interface and provide the queuing mechanism. Each transport is responsible for:
     *   Managing its own long-running processes (Heartbeat and Consume methods)
@@ -48,9 +48,9 @@ All transports must implement the following interface:
 ```go
 type Transport interface {
     Publish(ctx context.Context, job *Job) error
-    Heartbeat(ctx context.Context, id string) error  // Blocks until context cancelled
-    Consume(ctx context.Context, id string, jobQueue chan *Job) error  // Blocks until context cancelled
-    ConsumeAll(ctx context.Context, id string, jobQueue chan *Job) error
+    Heartbeat(ctx context.Context, id idx.ID) error  // Blocks until context cancelled
+    Consume(ctx context.Context, id idx.ID, jobQueue chan *Job) error  // Blocks until context cancelled
+    ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *Job) error
     Requeue(ctx context.Context, job *Job) error
     SendToDLQ(ctx context.Context, job *Job) error
     Completed(ctx context.Context, job *Job) error
@@ -88,7 +88,7 @@ The `ConsumeAll` method is designed for batch processing scenarios where you wan
 To run the tests, you can use the provided Docker Compose setup, which includes a Redis instance:
 
 ```sh
-docker-compose -f compose.yml run --rm nakusp-test
+docker compose run --rm nakusp
 ```
 
 ## Usage

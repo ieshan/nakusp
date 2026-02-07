@@ -136,7 +136,7 @@ func (n *Nakusp) ConsumeAll(transportName string) error {
 // StartWorker begins the job processing loop for a given transport.
 // It listens for jobs and executes them in separate goroutines.
 // If scheduled tasks are registered, it also starts a scheduler goroutine
-// that publishes jobs at their configured intervals using a smart timer-based approach.
+// that publishes jobs at their configured intervals using a single timer-based approach.
 func (n *Nakusp) StartWorker(transportName string) error {
 	n.lock.RLock()
 	transport := n.transports[transportName]

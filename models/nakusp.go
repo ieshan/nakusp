@@ -50,7 +50,7 @@ type Handler struct {
 
 // Transport defines the interface that all transport implementations must satisfy.
 // Transports are responsible for managing job queues and worker coordination.
-// All methods that run in loops (Heartbeat, Fetch) should block until the context is cancelled.
+// Long-running methods (Heartbeat, Consume) should block until the context is cancelled.
 type Transport interface {
 	// Publish adds a new job to the queue.
 	Publish(ctx context.Context, job *Job) error
