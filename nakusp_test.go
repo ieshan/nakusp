@@ -1,17 +1,38 @@
 package nakusp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
 	"github.com/ieshan/nakusp/transports"
-	"github.com/oklog/ulid/v2"
 )
+
+// safeBuffer is a threadsafe buffer for capturing slog output during tests.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 type nakuspTest struct {
 	n             *Nakusp
@@ -84,7 +105,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		job := &models.Job{
-			ID:      ulid.Make().String(),
+			ID:      idx.NewID(),
 			Name:    "test-task",
 			Payload: "payload",
 		}
@@ -130,7 +151,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		job := &models.Job{
-			ID:      ulid.Make().String(),
+			ID:      idx.NewID(),
 			Name:    "test-task",
 			Payload: "payload",
 		}
@@ -182,7 +203,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		job := &models.Job{
-			ID:         ulid.Make().String(),
+			ID:         idx.NewID(),
 			Name:       "test-task",
 			Payload:    "payload",
 			RetryCount: 1,
@@ -226,7 +247,7 @@ func TestNakusp(t *testing.T) {
 		nt.setup(t)
 		ctx := context.Background()
 
-		processedJobs := make(chan string, 3)
+		processedJobs := make(chan idx.ID, 3)
 		handler := models.Handler{
 			MaxRetry: 1,
 			Func: func(job *models.Job) error {
@@ -239,9 +260,9 @@ func TestNakusp(t *testing.T) {
 		}
 
 		jobs := []*models.Job{
-			{ID: "1", Name: "test-task", Payload: "payload1"},
-			{ID: "2", Name: "test-task", Payload: "payload2"},
-			{ID: "3", Name: "test-task", Payload: "payload3"},
+			{ID: idx.NewID(), Name: "test-task", Payload: "payload1"},
+			{ID: idx.NewID(), Name: "test-task", Payload: "payload2"},
+			{ID: idx.NewID(), Name: "test-task", Payload: "payload3"},
 		}
 
 		for _, job := range jobs {
@@ -454,6 +475,12 @@ func TestNakusp(t *testing.T) {
 		var nt nakuspTest
 		nt.setup(t)
 
+		buf := &safeBuffer{}
+		logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		origLogger := slog.Default()
+		slog.SetDefault(logger)
+		defer slog.SetDefault(origLogger)
+
 		// Add schedule without registering handler
 		if err := nt.n.AddSchedule("missing-handler", 50*time.Millisecond); err != nil {
 			t.Fatalf("AddSchedule returned error: %v", err)
@@ -469,6 +496,11 @@ func TestNakusp(t *testing.T) {
 
 		// Let it run briefly - should not panic even without handler
 		time.Sleep(150 * time.Millisecond)
+
+		logs := buf.String()
+		if !strings.Contains(logs, "handler 'missing-handler' not found") {
+			t.Fatalf("expected log to mention missing handler, got: %s", logs)
+		}
 	})
 
 	t.Run("ScheduleTimerEfficiency", func(t *testing.T) {

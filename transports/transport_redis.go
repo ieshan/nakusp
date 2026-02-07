@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
 	"github.com/redis/go-redis/v9"
 )
@@ -77,7 +78,7 @@ func (t *RedisTransport) Publish(ctx context.Context, job *models.Job) error {
 // Heartbeat updates a worker's status in Redis, indicating that it is still alive.
 // It runs in a loop, sending heartbeats at intervals defined by HeartbeatPeriod.
 // The method blocks until the context is cancelled.
-func (t *RedisTransport) Heartbeat(ctx context.Context, id string) error {
+func (t *RedisTransport) Heartbeat(ctx context.Context, id idx.ID) error {
 	ticker := time.NewTicker(t.config.HeartbeatInternal)
 	defer ticker.Stop()
 
@@ -95,10 +96,10 @@ func (t *RedisTransport) Heartbeat(ctx context.Context, id string) error {
 }
 
 // sendHeartbeat sends a single heartbeat to Redis.
-func (t *RedisTransport) sendHeartbeat(ctx context.Context, id string) error {
+func (t *RedisTransport) sendHeartbeat(ctx context.Context, id idx.ID) error {
 	_, err := t.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.HSetNX(ctx, t.keys.OnlineWorkers, id, id)
-		pipe.HExpire(ctx, t.keys.OnlineWorkers, 20*time.Minute, id)
+		pipe.HSetNX(ctx, t.keys.OnlineWorkers, id.String(), id)
+		pipe.HExpire(ctx, t.keys.OnlineWorkers, 20*time.Minute, id.String())
 		return nil
 	})
 	return err
@@ -107,7 +108,7 @@ func (t *RedisTransport) sendHeartbeat(ctx context.Context, id string) error {
 // Consume retrieves jobs from the 'todo' queue using a Lua script for atomicity.
 // It continuously polls for jobs and sends them to the jobQueue channel.
 // The method blocks until the context is cancelled.
-func (t *RedisTransport) Consume(ctx context.Context, id string, jobQueue chan *models.Job) error {
+func (t *RedisTransport) Consume(ctx context.Context, id idx.ID, jobQueue chan *models.Job) error {
 	const fetchInterval = 200 * time.Millisecond
 	ticker := time.NewTicker(fetchInterval)
 	defer ticker.Stop()
@@ -119,7 +120,7 @@ func (t *RedisTransport) Consume(ctx context.Context, id string, jobQueue chan *
 		default:
 		}
 
-		fetched, err := t.fetchAndProcessTasks(ctx, id, jobQueue)
+		fetched, err := t.fetchAndProcessTasks(ctx, id.String(), jobQueue)
 		if err != nil {
 			return err
 		}
@@ -140,7 +141,7 @@ func (t *RedisTransport) Consume(ctx context.Context, id string, jobQueue chan *
 
 // ConsumeAll fetches all available jobs from the 'todo' queue and sends them to the jobQueue.
 // It continues to fetch jobs until the queue is empty, and then closes the jobQueue channel.
-func (t *RedisTransport) ConsumeAll(ctx context.Context, id string, jobQueue chan *models.Job) error {
+func (t *RedisTransport) ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *models.Job) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -148,7 +149,7 @@ func (t *RedisTransport) ConsumeAll(ctx context.Context, id string, jobQueue cha
 		default:
 		}
 
-		fetched, err := t.fetchAndProcessTasks(ctx, id, jobQueue)
+		fetched, err := t.fetchAndProcessTasks(ctx, id.String(), jobQueue)
 		if err != nil {
 			return err
 		}
@@ -208,8 +209,12 @@ func parseJobPayload(payload string) (*models.Job, error) {
 	if len(parts) < 3 {
 		return nil, fmt.Errorf("invalid job payload format: %s", payload)
 	}
+	jobId, err := idx.FromString(parts[0])
+	if err != nil {
+		return nil, err
+	}
 	return &models.Job{
-		ID:      parts[0],
+		ID:      jobId,
 		Name:    parts[1],
 		Payload: parts[2],
 	}, nil
@@ -222,7 +227,7 @@ func (t *RedisTransport) Requeue(ctx context.Context, job *models.Job) error {
 		pipe.Decr(ctx, t.keys.InProgressTasks)
 		pipe.RPush(ctx, t.keys.ToDoQueue, payload)
 		pipe.LRem(ctx, t.keys.InProgressQueue, 1, payload)
-		pipe.HDel(ctx, t.keys.TaskAttachedWorker, job.ID)
+		pipe.HDel(ctx, t.keys.TaskAttachedWorker, job.ID.String())
 		return nil
 	})
 	return err
@@ -235,7 +240,7 @@ func (t *RedisTransport) SendToDLQ(ctx context.Context, job *models.Job) error {
 		pipe.Decr(ctx, t.keys.InProgressTasks)
 		pipe.RPush(ctx, t.keys.DeadLetterQueue, payload)
 		pipe.LRem(ctx, t.keys.InProgressQueue, 1, payload)
-		pipe.HDel(ctx, t.keys.TaskAttachedWorker, job.ID)
+		pipe.HDel(ctx, t.keys.TaskAttachedWorker, job.ID.String())
 		return nil
 	})
 	return err
@@ -247,7 +252,7 @@ func (t *RedisTransport) Completed(ctx context.Context, job *models.Job) error {
 	_, err := t.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Decr(ctx, t.keys.InProgressTasks)
 		pipe.LRem(ctx, t.keys.InProgressQueue, 1, payload)
-		pipe.HDel(ctx, t.keys.TaskAttachedWorker, job.ID)
+		pipe.HDel(ctx, t.keys.TaskAttachedWorker, job.ID.String())
 		return nil
 	})
 	return err

@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
 	trnspt "github.com/ieshan/nakusp/transports"
-	"github.com/oklog/ulid/v2"
 )
 
 const (
@@ -24,7 +24,7 @@ const (
 // Nakusp is a background job processing system that supports multiple transport layers.
 // It manages a pool of workers to execute jobs asynchronously.
 type Nakusp struct {
-	id                string
+	id                idx.ID
 	config            *models.Config
 	handlers          map[string]models.Handler
 	transportHandlers map[string]string
@@ -52,7 +52,7 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 	}
 
 	return &Nakusp{
-		id:                ulid.Make().String(),
+		id:                idx.NewID(),
 		config:            config,
 		handlers:          make(map[string]models.Handler),
 		transportHandlers: make(map[string]string),
@@ -65,7 +65,7 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 }
 
 // ID returns the unique identifier for the Nakusp worker instance.
-func (n *Nakusp) ID() string {
+func (n *Nakusp) ID() idx.ID {
 	return n.id
 }
 
@@ -82,7 +82,7 @@ func (n *Nakusp) AddHandler(taskName string, handler models.Handler) error {
 
 // Publish sends a new job to the appropriate transport based on the task name.
 // If no specific transport is registered for the task, it uses the default transport.
-func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (string, error) {
+func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (idx.ID, error) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 
@@ -90,7 +90,7 @@ func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (
 	if !ok {
 		transportName = DefaultTransport
 	}
-	taskId := ulid.Make().String()
+	taskId := idx.NewID()
 	return taskId, n.transports[transportName].Publish(ctx, &models.Job{
 		ID:         taskId,
 		Name:       taskName,
@@ -153,7 +153,7 @@ func (n *Nakusp) StartWorker(transportName string) error {
 	go n.RunUntilCancelled(ctx, transport.Heartbeat)
 	go n.RunUntilCancelled(
 		ctx,
-		func(ctx context.Context, id string) error {
+		func(ctx context.Context, id idx.ID) error {
 			return transport.Consume(ctx, id, n.jobQueue)
 		},
 	)
@@ -190,7 +190,7 @@ func (n *Nakusp) StartWorker(transportName string) error {
 
 // RunUntilCancelled is a helper function that runs a given handler function until the context is cancelled.
 // The handler is responsible for honouring the context (including any pacing or blocking behaviour).
-func (n *Nakusp) RunUntilCancelled(ctx context.Context, handlerFn func(context.Context, string) error) {
+func (n *Nakusp) RunUntilCancelled(ctx context.Context, handlerFn func(context.Context, idx.ID) error) {
 	defer n.wg.Done()
 
 	select {
@@ -282,7 +282,7 @@ type scheduleEntry struct {
 // It always schedules the timer for the next soonest task, and after each fire,
 // it recalculates the next wait duration. This approach is more efficient than
 // using multiple tickers, especially when dealing with many tasks with different intervals.
-func (n *Nakusp) runScheduler(ctx context.Context, _ string) error {
+func (n *Nakusp) runScheduler(ctx context.Context, _ idx.ID) error {
 	// Snapshot schedules to avoid holding lock during execution
 	n.lock.RLock()
 	if len(n.schedules) == 0 {

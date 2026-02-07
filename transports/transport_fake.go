@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
 )
 
@@ -30,13 +31,13 @@ func (t *FakeTransport) Publish(_ context.Context, job *models.Job) error {
 }
 
 // Heartbeat blocks until the context is cancelled, mirroring long-running transports.
-func (t *FakeTransport) Heartbeat(ctx context.Context, _ string) error {
+func (t *FakeTransport) Heartbeat(ctx context.Context, _ idx.ID) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
 
 // Consume continually drains the in-memory queue, waiting briefly when no jobs are available.
-func (t *FakeTransport) Consume(ctx context.Context, _ string, jobQueue chan *models.Job) error {
+func (t *FakeTransport) Consume(ctx context.Context, _ idx.ID, jobQueue chan *models.Job) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -64,7 +65,7 @@ func (t *FakeTransport) Consume(ctx context.Context, _ string, jobQueue chan *mo
 }
 
 // ConsumeAll sends all jobs from the in-memory queue to the jobQueue and then closes the channel.
-func (t *FakeTransport) ConsumeAll(ctx context.Context, _ string, jobQueue chan *models.Job) error {
+func (t *FakeTransport) ConsumeAll(ctx context.Context, _ idx.ID, jobQueue chan *models.Job) error {
 	t.mu.Lock()
 	jobs := make([]*models.Job, len(t.Jobs))
 	copy(jobs, t.Jobs)
@@ -91,7 +92,7 @@ func (t *FakeTransport) Requeue(ctx context.Context, job *models.Job) error {
 
 // removeJob removes a job with the given ID from the queue.
 // Must be called with mutex held.
-func (t *FakeTransport) removeJob(jobID string) {
+func (t *FakeTransport) removeJob(jobID idx.ID) {
 	filtered := make([]*models.Job, 0, len(t.Jobs))
 	for _, j := range t.Jobs {
 		if j.ID != jobID {

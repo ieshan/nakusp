@@ -4,6 +4,8 @@ package models
 import (
 	"context"
 	"time"
+
+	"github.com/ieshan/idx"
 )
 
 // Config holds configuration parameters for the Nakusp system.
@@ -21,7 +23,7 @@ type Config struct {
 // Job represents a unit of work to be processed by a worker.
 type Job struct {
 	// ID is the unique identifier for the job.
-	ID string
+	ID idx.ID
 
 	// Name is the job type identifier, used to route jobs to appropriate handlers.
 	Name string
@@ -55,14 +57,14 @@ type Transport interface {
 
 	// Heartbeat runs in a loop, periodically updating the worker's status to indicate it's alive.
 	// This method should block until the context is cancelled.
-	Heartbeat(ctx context.Context, id string) error
+	Heartbeat(ctx context.Context, id idx.ID) error
 
 	// ConsumeAll consumes all jobs from the queue and cancels the jobQueue channel after all jobs are consumed.
-	ConsumeAll(ctx context.Context, id string, jobQueue chan *Job) error
+	ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *Job) error
 
 	// Consume runs in a loop, continuously retrieving jobs from the queue and sending them to jobQueue.
 	// This method should block until the context is cancelled.
-	Consume(ctx context.Context, id string, jobQueue chan *Job) error
+	Consume(ctx context.Context, id idx.ID, jobQueue chan *Job) error
 
 	// Requeue moves a failed job back to the queue for retry.
 	Requeue(ctx context.Context, job *Job) error

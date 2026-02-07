@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
-	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -50,7 +50,7 @@ func TestTransport(t *testing.T) {
 			t.Run("PublishAndConsume", func(t *testing.T) {
 				transport := buildTransport(t)
 				var wg sync.WaitGroup
-				job := &models.Job{ID: ulid.Make().String(), Name: "test-job", Payload: "test-payload"}
+				job := &models.Job{ID: idx.NewID(), Name: "test-job", Payload: "test-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -62,7 +62,7 @@ func TestTransport(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if err := transport.Consume(consumeCtx, "test-worker", jobQueue); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					if err := transport.Consume(consumeCtx, idx.NewID(), jobQueue); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						t.Errorf("Consume() returned an unexpected error: %v", err)
 					}
 				}()
@@ -80,7 +80,7 @@ func TestTransport(t *testing.T) {
 
 			t.Run("Completed", func(t *testing.T) {
 				transport := buildTransport(t)
-				job := &models.Job{ID: ulid.Make().String(), Name: "completed-job", Payload: "completed-payload"}
+				job := &models.Job{ID: idx.NewID(), Name: "completed-job", Payload: "completed-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -91,7 +91,7 @@ func TestTransport(t *testing.T) {
 
 			t.Run("Requeue", func(t *testing.T) {
 				transport := buildTransport(t)
-				job := &models.Job{ID: ulid.Make().String(), Name: "requeue-job", Payload: "requeue-payload"}
+				job := &models.Job{ID: idx.NewID(), Name: "requeue-job", Payload: "requeue-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -102,7 +102,7 @@ func TestTransport(t *testing.T) {
 
 			t.Run("SendToDLQ", func(t *testing.T) {
 				transport := buildTransport(t)
-				job := &models.Job{ID: ulid.Make().String(), Name: "dlq-job", Payload: "dlq-payload"}
+				job := &models.Job{ID: idx.NewID(), Name: "dlq-job", Payload: "dlq-payload"}
 				if err := transport.Publish(ctx, job); err != nil {
 					t.Fatalf("Publish() error = %v", err)
 				}
@@ -114,9 +114,9 @@ func TestTransport(t *testing.T) {
 			t.Run("ConsumeAll", func(t *testing.T) {
 				transport := buildTransport(t)
 				jobs := []*models.Job{
-					{ID: ulid.Make().String(), Name: "job-1", Payload: "payload-1"},
-					{ID: ulid.Make().String(), Name: "job-2", Payload: "payload-2"},
-					{ID: ulid.Make().String(), Name: "job-3", Payload: "payload-3"},
+					{ID: idx.NewID(), Name: "job-1", Payload: "payload-1"},
+					{ID: idx.NewID(), Name: "job-2", Payload: "payload-2"},
+					{ID: idx.NewID(), Name: "job-3", Payload: "payload-3"},
 				}
 
 				for _, job := range jobs {
@@ -134,14 +134,14 @@ func TestTransport(t *testing.T) {
 				var consumeErr error
 				go func() {
 					defer wg.Done()
-					consumeErr = transport.ConsumeAll(consumeCtx, "test-worker", jobQueue)
+					consumeErr = transport.ConsumeAll(consumeCtx, idx.NewID(), jobQueue)
 				}()
 
 				receivedJobs := make(map[string]bool)
 				for i := 0; i < len(jobs); i++ {
 					select {
 					case job := <-jobQueue:
-						receivedJobs[job.ID] = true
+						receivedJobs[job.ID.String()] = true
 					case <-time.After(5 * time.Second):
 						t.Fatal("timed out waiting for job")
 					}
@@ -159,7 +159,7 @@ func TestTransport(t *testing.T) {
 				}
 
 				for _, job := range jobs {
-					if !receivedJobs[job.ID] {
+					if !receivedJobs[job.ID.String()] {
 						t.Errorf("job with ID %s was not consumed", job.ID)
 					}
 				}
