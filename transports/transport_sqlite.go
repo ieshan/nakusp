@@ -3,6 +3,7 @@ package transports
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -149,45 +150,36 @@ func (t *SQLiteTransport) fetchOnce(ctx context.Context, id idx.ID, jobQueue cha
 		}
 	}()
 
-	rows, err := tx.QueryContext(ctx, "SELECT id, name, payload, retry_count FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1")
-	if err != nil {
-		return false, err
-	}
+	lockedUntil := time.Now().Add(5 * time.Minute) // 5-minute lock
+	row := tx.QueryRowContext(
+		ctx,
+		`WITH next_job AS (
+			SELECT id, name, payload, retry_count
+			FROM jobs
+			WHERE status = 'queued'
+			ORDER BY created_at ASC
+			LIMIT 1
+		)
+		UPDATE jobs
+		SET status = 'in_progress', worker_id = ?, locked_until = ?
+		WHERE id IN (SELECT id FROM next_job)
+		RETURNING id, name, payload, retry_count`,
+		id, lockedUntil,
+	)
 
-	var jobsToUpdate []string
-	for rows.Next() {
-		var job models.Job
-		if err = rows.Scan(&job.ID, &job.Name, &job.Payload, &job.RetryCount); err != nil {
-			return false, err
-		}
-		jobCopy := job
-		jobQueue <- &jobCopy
-		jobsToUpdate = append(jobsToUpdate, job.ID.String())
-		fetched = true
-	}
-	if err = rows.Err(); err != nil {
-		return false, err
-	}
-	if err = rows.Close(); err != nil {
-		return false, err
-	}
-
-	if fetched {
-		stmt, stmtErr := tx.PrepareContext(ctx, "UPDATE jobs SET status = 'in_progress', worker_id = ?, locked_until = ? WHERE id = ?")
-		if stmtErr != nil {
-			return false, stmtErr
-		}
-		lockedUntil := time.Now().Add(5 * time.Minute) // 5-minute lock
-		for _, jobID := range jobsToUpdate {
-			if _, err = stmt.ExecContext(ctx, id, lockedUntil, jobID); err != nil {
-				_ = stmt.Close()
+	var job models.Job
+	if scanErr := row.Scan(&job.ID, &job.Name, &job.Payload, &job.RetryCount); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			if err = tx.Commit(); err != nil {
 				return false, err
 			}
+			return false, nil
 		}
-		if err = stmt.Close(); err != nil {
-			return false, err
-		}
+		return false, scanErr
 	}
+
+	jobQueue <- &job
+	fetched = true
 
 	if err = tx.Commit(); err != nil {
 		return false, err
@@ -200,7 +192,7 @@ func (t *SQLiteTransport) fetchOnce(ctx context.Context, id idx.ID, jobQueue cha
 func (t *SQLiteTransport) Requeue(ctx context.Context, job *models.Job) error {
 	_, err := t.db.ExecContext(
 		ctx,
-		"UPDATE jobs SET status = 'queued', retry_count = ?, worker_id = NULL, locked_until = NULL WHERE id = ?",
+		"UPDATE jobs SET status = 'queued', retry_count = ?, worker_id = NULL, locked_until = NULL WHERE id = ? AND status = 'in_progress'",
 		job.RetryCount, job.ID,
 	)
 	return err
