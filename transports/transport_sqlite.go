@@ -39,6 +39,11 @@ func NewSQLite(dsn string, config *SQLiteConfig) (*SQLiteTransport, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
+	// Ensure a single underlying connection to avoid writer contention locks.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
 	// Create jobs table
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS jobs (
