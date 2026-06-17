@@ -1,6 +1,6 @@
-// Package transports provides various backend implementations for the Nakusp job queue system.
-// Each transport implements the models.Transport interface and provides different storage
-// mechanisms (in-memory, SQLite, Redis) for job queuing and processing.
+// Package transports provides the Transport interface, shared utilities,
+// and a zero-dependency FakeTransport for testing.
+// External transports (Redis, SQLite) live in separate submodules.
 package transports
 
 import (

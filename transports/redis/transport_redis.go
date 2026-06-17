@@ -1,4 +1,4 @@
-package transports
+package redis
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
+	"github.com/ieshan/nakusp/transports"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -72,7 +73,7 @@ func NewRedis(client *redis.Client, keys *RedisKeys, config *RedisConfig) *Redis
 
 // Publish adds a new job to the Redis 'todo' queue.
 func (t *RedisTransport) Publish(ctx context.Context, job *models.Job) error {
-	return t.client.RPush(ctx, t.keys.ToDoQueue, GetPayload(job)).Err()
+	return t.client.RPush(ctx, t.keys.ToDoQueue, transports.GetPayload(job)).Err()
 }
 
 // Heartbeat updates a worker's status in Redis, indicating that it is still alive.
@@ -222,7 +223,7 @@ func parseJobPayload(payload string) (*models.Job, error) {
 
 // Requeue moves a job from the 'in_progress' queue back to the 'todo' queue.
 func (t *RedisTransport) Requeue(ctx context.Context, job *models.Job) error {
-	payload := GetPayload(job)
+	payload := transports.GetPayload(job)
 	_, err := t.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Decr(ctx, t.keys.InProgressTasks)
 		pipe.RPush(ctx, t.keys.ToDoQueue, payload)
@@ -235,7 +236,7 @@ func (t *RedisTransport) Requeue(ctx context.Context, job *models.Job) error {
 
 // SendToDLQ moves a job to the Dead Letter Queue in Redis.
 func (t *RedisTransport) SendToDLQ(ctx context.Context, job *models.Job) error {
-	payload := GetPayload(job)
+	payload := transports.GetPayload(job)
 	_, err := t.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Decr(ctx, t.keys.InProgressTasks)
 		pipe.RPush(ctx, t.keys.DeadLetterQueue, payload)
@@ -248,7 +249,7 @@ func (t *RedisTransport) SendToDLQ(ctx context.Context, job *models.Job) error {
 
 // Completed removes a job from the 'in_progress' queue and its associated data from Redis.
 func (t *RedisTransport) Completed(ctx context.Context, job *models.Job) error {
-	payload := GetPayload(job)
+	payload := transports.GetPayload(job)
 	_, err := t.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Decr(ctx, t.keys.InProgressTasks)
 		pipe.LRem(ctx, t.keys.InProgressQueue, 1, payload)

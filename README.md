@@ -4,7 +4,7 @@ Nakusp is a flexible and extensible background job processing system written in 
 
 ## Features
 
-- **Multiple Transport Backends**: Choose from in-memory (FakeTransport), Redis, or SQLite
+- **Multiple Transport Backends**: Choose from in-memory (FakeTransport), Redis, or SQLite with opt-in dependencies
 - **Scheduled Tasks**: Built-in cron-like scheduling with efficient timer-based execution
 - **Retry Logic**: Configurable retry counts with automatic Dead Letter Queue (DLQ) support
 - **Graceful Shutdown**: Signal-based shutdown with configurable timeout
@@ -25,17 +25,17 @@ The system is composed of two main components:
 
 ### Built-in Transports
 
-Nakusp comes with three production-ready transports:
+Nakusp comes with three production-ready transports. The root module includes only `FakeTransport` (zero dependencies). Redis and SQLite transports live in separate submodules so you only pull in the dependencies you need.
 
-*   **FakeTransport**: An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
+*   **FakeTransport** (root module `github.com/ieshan/nakusp`): An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
 
-*   **RedisTransport**: A production-grade transport using Redis lists and Lua scripts for atomic operations. Features include:
+*   **RedisTransport** (submodule `github.com/ieshan/nakusp/transports/redis`): A production-grade transport using Redis lists and Lua scripts for atomic operations. Features include:
     *   Atomic job consuming with distributed locking
     *   Worker heartbeat tracking with automatic expiration
     *   Configurable polling intervals (200ms default for consuming)
     *   Support for Dead Letter Queue (DLQ) for failed jobs
 
-*   **SQLiteTransport**: A persistent transport using SQLite for local job storage. Features include:
+*   **SQLiteTransport** (submodule `github.com/ieshan/nakusp/transports/sqlite`): A persistent transport using SQLite for local job storage. Features include:
     *   Transaction-based job locking to prevent duplicate processing
     *   Configurable heartbeat (30s) and consume (250ms) intervals
     *   Automatic job expiration and worker health monitoring
@@ -65,7 +65,7 @@ The `ConsumeAll` method is designed for batch processing scenarios where you wan
 
 ### Prerequisites
 
-*   Go 1.25 or later
+*   Go 1.26 or later
 *   Docker and Docker Compose
 
 ### Installation
@@ -77,18 +77,25 @@ The `ConsumeAll` method is designed for batch processing scenarios where you wan
     cd nakusp
     ```
 
-2.  Install dependencies:
+2.  Set up the development workspace:
 
     ```sh
-    go mod tidy
+    ./dev.sh setup
     ```
 
 ### Running Tests
 
-To run the tests, you can use the provided Docker Compose setup, which includes a Redis instance:
+To run the tests, you can use the provided `dev.sh` script:
 
 ```sh
-docker compose run --rm nakusp
+# Run all tests locally (root, redis, and sqlite modules)
+./dev.sh test
+
+# Run tests in Docker with a Redis instance
+./dev.sh test-docker
+
+# Run the full CI pipeline
+./dev.sh ci
 ```
 
 ## Usage
@@ -270,6 +277,24 @@ func main() {
 }
 ```
 
+## Development
+
+Nakusp uses a Go workspace for local multi-module development.
+
+```sh
+# One-time setup (generates go.work, syncs deps)
+./dev.sh setup
+
+# Run all tests locally
+./dev.sh test
+
+# Run tests in Docker (includes Redis integration tests)
+./dev.sh test-docker
+
+# Run the full CI pipeline
+./dev.sh ci
+```
+
 ## Transports
 
 Nakusp's strength lies in its flexible transport system. You can easily switch between transports or even use multiple transports in the same application.
@@ -284,7 +309,7 @@ The `RedisTransport` uses Redis as a backend and is suitable for production envi
 
 ```go
 import (
-	"github.com/ieshan/nakusp/transports"
+	redis "github.com/ieshan/nakusp/transports/redis"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -294,7 +319,7 @@ redisClient := redis.NewClient(&redis.Options{
 	Addr: "localhost:6379",
 })
 
-redisTransport := transports.NewRedis(redisClient, nil, nil)
+redisTransport := redis.NewRedis(redisClient, nil, nil)
 
 // ...
 ```
@@ -304,11 +329,11 @@ redisTransport := transports.NewRedis(redisClient, nil, nil)
 The `SQLiteTransport` provides a persistent job queue using a SQLite database. This is a good option if you need persistence without the overhead of a full-fledged Redis server.
 
 ```go
-import "github.com/ieshan/nakusp/transports"
+import sqlite "github.com/ieshan/nakusp/transports/sqlite"
 
 // ...
 
-sqliteTransport, err := transports.NewSQLite("/path/to/your.db")
+sqliteTransport, err := sqlite.NewSQLite("/path/to/your.db", nil)
 if err != nil {
 	panic(err)
 }

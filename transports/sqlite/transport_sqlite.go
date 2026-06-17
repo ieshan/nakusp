@@ -1,4 +1,4 @@
-package transports
+package sqlite
 
 import (
 	"context"

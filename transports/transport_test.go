@@ -3,108 +3,20 @@ package transports
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
-	"github.com/redis/go-redis/v9"
 )
 
-func TestTransport(t *testing.T) {
+func TestFakeTransport(t *testing.T) {
 	transportBuilders := map[string]func(t *testing.T) models.Transport{
 		"fake": func(t *testing.T) models.Transport {
 			return NewFake()
 		},
-		"sqlite": func(t *testing.T) models.Transport {
-			sqlite, err := NewSQLite(":memory:", &SQLiteConfig{HeartbeatInternal: 5 * time.Minute, FetchInterval: 2 * time.Second})
-			if err != nil {
-				t.Fatalf("failed to create sqlite transport: %v", err)
-			}
-			return sqlite
-		},
 	}
-
-	redisURI := os.Getenv("REDIS_URI")
-	if redisURI != "" {
-		transportBuilders["redis"] = func(t *testing.T) models.Transport {
-			opt, err := redis.ParseURL(redisURI)
-			if err != nil {
-				t.Fatalf("failed to parse redis uri: %v", err)
-			}
-			client := redis.NewClient(opt)
-			// Flush all keys before each test to ensure clean state
-			if err = client.FlushAll(context.Background()).Err(); err != nil {
-				t.Fatalf("failed to flush redis: %v", err)
-			}
-			return NewRedis(client, nil, nil)
-		}
-	}
-
-	// SQLite-specific regression tests
-	t.Run("sqlite_atomic_claim_single_delivery", func(t *testing.T) {
-		ctx := context.Background()
-		transport := transportBuilders["sqlite"](t)
-		job := &models.Job{ID: idx.NewID(), Name: "race-job", Payload: "payload"}
-		if err := transport.Publish(ctx, job); err != nil {
-			t.Fatalf("Publish() error = %v", err)
-		}
-
-		jobQueue := make(chan *models.Job, 2)
-		consumeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-
-		var wg sync.WaitGroup
-		var received int32
-
-		consumeOnce := func() {
-			defer wg.Done()
-			_ = transport.Consume(consumeCtx, idx.NewID(), jobQueue)
-		}
-
-		wg.Add(2)
-		go consumeOnce()
-		go consumeOnce()
-
-		select {
-		case <-consumeCtx.Done():
-			t.Fatalf("did not receive job: %v", consumeCtx.Err())
-		case <-jobQueue:
-			atomic.AddInt32(&received, 1)
-			cancel()
-		}
-
-		wg.Wait()
-		if got := atomic.LoadInt32(&received); got != 1 {
-			t.Fatalf("expected exactly one delivery, got %d", got)
-		}
-	})
-
-	t.Run("sqlite_dlq_not_requeued", func(t *testing.T) {
-		ctx := context.Background()
-		transport := transportBuilders["sqlite"](t)
-		job := &models.Job{ID: idx.NewID(), Name: "dlq-job", Payload: "payload"}
-		if err := transport.Publish(ctx, job); err != nil {
-			t.Fatalf("Publish() error = %v", err)
-		}
-		if err := transport.SendToDLQ(ctx, job); err != nil {
-			t.Fatalf("SendToDLQ() error = %v", err)
-		}
-
-		jobQueue := make(chan *models.Job, 1)
-		if err := transport.ConsumeAll(ctx, idx.NewID(), jobQueue); err != nil {
-			t.Fatalf("ConsumeAll() error = %v", err)
-		}
-
-		select {
-		case <-jobQueue:
-			t.Fatalf("expected no jobs from DLQ")
-		default:
-		}
-	})
 
 	for name, buildTransport := range transportBuilders {
 		t.Run(name, func(t *testing.T) {

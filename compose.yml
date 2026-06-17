@@ -1,6 +1,6 @@
 services:
-  nakusp:
-    image: golang:1.26.0-trixie
+  test:
+    image: golang:1.26.4-trixie
     working_dir: /app
     volumes:
       - "./:/app"
@@ -8,12 +8,15 @@ services:
       - nakusp-network
     depends_on:
       - redis
-    command: ["sh", "-c", "go mod download && go test -v ./..."]
+    command:
+      - "sh"
+      - "-c"
+      - "rm -f go.work go.work.sum && go work init . ./transports/redis ./transports/sqlite && go mod download && go test -v ./..."
     stop_signal: SIGINT
     environment:
       REDIS_URI: "redis://redis:6379/0"
   redis:
-    image: redis:8.6.0-alpine3.23
+    image: redis:8.8.0-alpine3.23
     restart: always
     networks:
       - nakusp-network
