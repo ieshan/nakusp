@@ -1,5 +1,7 @@
 github.com/ieshan/idx v1.3.0 h1:LXxOGeijgeU0ONBtAsXj5NaQQeRvtk7rPUVv9bXRpXo=
 github.com/ieshan/idx v1.3.0/go.mod h1:mLwYfE7q2icj5O7XnBgX0xoV8LUMFddqoDDcVYXGIio=
+github.com/ieshan/idx v1.3.2 h1:Z+nQhNXTYeF569jKkMk94U4GM8Oz/8XURgfHiiKz99U=
+github.com/ieshan/idx v1.3.2/go.mod h1:tFNyx3HW68C5eFsJdNPMZVg7HovCgaTCHHIveG5QvqQ=
 github.com/oklog/ulid/v2 v2.1.1 h1:suPZ4ARWLOJLegGFiZZ1dFAkqzhMjL3J1TzI+5wHz8s=
 github.com/oklog/ulid/v2 v2.1.1/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
 github.com/pborman/getopt v0.0.0-20170112200414-7148bc3a4c30/go.mod h1:85jBQOZwpVEaDAr341tbn15RS4fCAsIst0qp7i8ex1o=

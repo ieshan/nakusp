@@ -5,9 +5,9 @@ go 1.26
 replace github.com/ieshan/nakusp => ../../
 
 require (
-	github.com/ieshan/idx v1.3.0
+	github.com/ieshan/idx v1.3.2
 	github.com/ieshan/nakusp v0.0.0
-	github.com/redis/go-redis/v9 v9.20.1
+	github.com/redis/go-redis/v9 v9.21.0
 )
 
 require (
