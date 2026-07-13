@@ -2,11 +2,9 @@ module github.com/ieshan/nakusp/transports/sqlite
 
 go 1.26
 
-replace github.com/ieshan/nakusp => ../../
-
 require (
 	github.com/ieshan/idx v1.3.2
-	github.com/ieshan/nakusp v0.0.0
+	github.com/ieshan/nakusp v1.0.13
 	github.com/mattn/go-sqlite3 v1.14.47
 )
 
