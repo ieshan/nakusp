@@ -22,9 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - { name: root,   dir: "." }
-          - { name: redis,  dir: "transports/redis" }
-          - { name: sqlite, dir: "transports/sqlite" }
+          - { name: root,     dir: "." }
+          - { name: redis,    dir: "transports/redis" }
+          - { name: sqlite,   dir: "transports/sqlite" }
+          - { name: postgres, dir: "transports/postgres" }
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -51,14 +52,15 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - { name: root,   dir: "." }
-          - { name: redis,  dir: "transports/redis" }
-          - { name: sqlite, dir: "transports/sqlite" }
+          - { name: root,     dir: "." }
+          - { name: redis,    dir: "transports/redis" }
+          - { name: sqlite,   dir: "transports/sqlite" }
+          - { name: postgres, dir: "transports/postgres" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
-    # Service containers are per job-instance, not per matrix cell — the
-    # container also starts for root/sqlite cells, which ignore REDIS_URI.
+    # Service containers are per job-instance, not per matrix cell — both
+    # containers also start for root/sqlite cells, which ignore the env vars.
     services:
       dragonfly:
         image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.0
@@ -66,8 +68,23 @@ jobs:
           - 6379:6379
         # Same memlock ulimit as compose.yml.
         options: --ulimit memlock=-1
+      postgres:
+        image: postgres:18-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: nakusp
+        # Unlike dragonfly (no redis-cli), the postgres image ships pg_isready,
+        # so a real health check works and GitHub waits for it before steps run.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nakusp"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
     env:
       REDIS_URI: redis://localhost:6379/0
+      POSTGRES_DSN: postgres://postgres@localhost:5432/nakusp?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -122,9 +139,10 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - { name: root,   dir: "." }
-          - { name: redis,  dir: "transports/redis" }
-          - { name: sqlite, dir: "transports/sqlite" }
+          - { name: root,     dir: "." }
+          - { name: redis,    dir: "transports/redis" }
+          - { name: sqlite,   dir: "transports/sqlite" }
+          - { name: postgres, dir: "transports/postgres" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -134,8 +152,21 @@ jobs:
         ports:
           - 6379:6379
         options: --ulimit memlock=-1
+      postgres:
+        image: postgres:18-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: nakusp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nakusp"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
     env:
       REDIS_URI: redis://localhost:6379/0
+      POSTGRES_DSN: postgres://postgres@localhost:5432/nakusp?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -171,9 +202,10 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - { name: root,   dir: "." }
-          - { name: redis,  dir: "transports/redis" }
-          - { name: sqlite, dir: "transports/sqlite" }
+          - { name: root,     dir: "." }
+          - { name: redis,    dir: "transports/redis" }
+          - { name: sqlite,   dir: "transports/sqlite" }
+          - { name: postgres, dir: "transports/postgres" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -205,9 +237,10 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - { name: root,   dir: "." }
-          - { name: redis,  dir: "transports/redis" }
-          - { name: sqlite, dir: "transports/sqlite" }
+          - { name: root,     dir: "." }
+          - { name: redis,    dir: "transports/redis" }
+          - { name: sqlite,   dir: "transports/sqlite" }
+          - { name: postgres, dir: "transports/postgres" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -240,9 +273,10 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - { name: root,   dir: ".",                pkg: "github.com/ieshan/nakusp" }
-          - { name: redis,  dir: "transports/redis",  pkg: "github.com/ieshan/nakusp/transports/redis" }
-          - { name: sqlite, dir: "transports/sqlite", pkg: "github.com/ieshan/nakusp/transports/sqlite" }
+          - { name: root,     dir: ".",                   pkg: "github.com/ieshan/nakusp" }
+          - { name: redis,    dir: "transports/redis",    pkg: "github.com/ieshan/nakusp/transports/redis" }
+          - { name: sqlite,   dir: "transports/sqlite",   pkg: "github.com/ieshan/nakusp/transports/sqlite" }
+          - { name: postgres, dir: "transports/postgres", pkg: "github.com/ieshan/nakusp/transports/postgres" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}

@@ -1,10 +1,10 @@
 # Nakusp: A Background Job Processing System in Go
 
-Nakusp is a flexible and extensible background job processing system written in Go. It is designed to be transport-agnostic, allowing you to choose the backend that best fits your needs, whether it's an in-memory queue for testing, a robust Redis-based queue for production, or a persistent SQLite database.
+Nakusp is a flexible and extensible background job processing system written in Go. It is designed to be transport-agnostic, allowing you to choose the backend that best fits your needs, whether it's an in-memory queue for testing, a robust Redis-based queue for production, or a persistent SQL database (SQLite or PostgreSQL).
 
 ## Features
 
-- **Multiple Transport Backends**: Choose from in-memory (FakeTransport), Redis, or SQLite with opt-in dependencies
+- **Multiple Transport Backends**: Choose from in-memory (FakeTransport), Redis, SQLite, or PostgreSQL with opt-in dependencies
 - **Scheduled Tasks**: Built-in cron-like scheduling with efficient timer-based execution
 - **Retry Logic**: Configurable retry counts with automatic Dead Letter Queue (DLQ) support
 - **Graceful Shutdown**: Context-based graceful shutdown with a configurable `GracefulTimeout`
@@ -25,7 +25,7 @@ The system is composed of two main components:
 
 ### Built-in Transports
 
-Nakusp comes with three transports. The root module includes only `FakeTransport` (zero dependencies). Redis and SQLite transports live in separate submodules so you only pull in the dependencies you need.
+Nakusp comes with four transports. The root module includes only `FakeTransport` (zero dependencies). Redis, SQLite, and Postgres transports live in separate submodules so you only pull in the dependencies you need.
 
 *   **FakeTransport** (root module `github.com/ieshan/nakusp`): An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
 
@@ -40,6 +40,12 @@ Nakusp comes with three transports. The root module includes only `FakeTransport
     *   Configurable heartbeat (5m) and fetch (5s) intervals
     *   Job claims carry `locked_until` leases and worker heartbeats are tracked in a `workers` table
     *   Suitable for single-node deployments or development environments
+
+*   **PostgresTransport** (submodule `github.com/ieshan/nakusp/transports/postgres`): A persistent transport using PostgreSQL via gorm. Features include:
+    *   Atomic job claiming with `SELECT ... FOR UPDATE SKIP LOCKED` — concurrent consumers never receive the same job
+    *   Two constructors: `NewPostgres(dsn, cfg)` opens its own pool; `NewPostgresFromDB(db, cfg)` reuses an existing `*gorm.DB`
+    *   Configurable heartbeat, fetch, and lock durations; pluggable gorm logger (silent by default)
+    *   Claimed-but-undelivered jobs are requeued on shutdown
 
 ### Transport Interface
 
@@ -89,14 +95,17 @@ The `ConsumeAll` method is designed for batch processing scenarios where you wan
 To run the tests, you can use the provided `dev.sh` script:
 
 ```sh
-# Run all tests locally (root and sqlite modules; redis skips without REDIS_URI)
+# Run all tests locally (root and sqlite modules; redis skips without REDIS_URI, postgres skips without POSTGRES_DSN)
 ./dev.sh test
 
-# Run all module tests in Docker against a Redis-compatible backend (Dragonfly)
+# Run all module tests in Docker against Redis-compatible (Dragonfly) and Postgres backends
 ./dev.sh test-docker
 
 # Run only the Redis transport tests in Docker
 ./dev.sh test-redis-only
+
+# Run only the Postgres transport tests in Docker
+./dev.sh test-postgres-only
 
 # Run the full CI pipeline (vet + build + test)
 ./dev.sh ci
@@ -289,11 +298,14 @@ Nakusp uses a Go workspace for local multi-module development.
 # Run all tests locally
 ./dev.sh test
 
-# Run all module tests in Docker (includes Redis-compatible integration tests)
+# Run all module tests in Docker (includes Redis-compatible and Postgres integration tests)
 ./dev.sh test-docker
 
 # Run only the Redis transport tests in Docker
 ./dev.sh test-redis-only
+
+# Run only the Postgres transport tests in Docker
+./dev.sh test-postgres-only
 
 # Run the full CI pipeline
 ./dev.sh ci
@@ -338,6 +350,28 @@ import sqlite "github.com/ieshan/nakusp/transports/sqlite"
 // ...
 
 sqliteTransport, err := sqlite.NewSQLite("/path/to/your.db", nil)
+if err != nil {
+	panic(err)
+}
+
+// ...
+```
+
+### PostgresTransport
+
+The `PostgresTransport` provides a persistent job queue backed by PostgreSQL, implemented with gorm. It is a good option if you already run Postgres and want a durable multi-node queue without an additional service.
+
+```go
+import nakusppostgres "github.com/ieshan/nakusp/transports/postgres"
+
+// Option 1: the transport opens its own connection pool from a DSN.
+postgresTransport, err := nakusppostgres.NewPostgres("postgres://user:pass@localhost:5432/mydb?sslmode=disable", nil)
+if err != nil {
+	panic(err)
+}
+
+// Option 2: reuse an existing *gorm.DB (the transport will not close it).
+postgresTransport, err = nakusppostgres.NewPostgresFromDB(existingDB, nil)
 if err != nil {
 	panic(err)
 }

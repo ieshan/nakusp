@@ -19,6 +19,7 @@ MODULES=(
     "."
     "./transports/redis"
     "./transports/sqlite"
+    "./transports/postgres"
 )
 
 cmd_setup() {
@@ -34,7 +35,7 @@ cmd_setup() {
     # Always regenerate go.work to handle module list changes
     log_info "Generating Go workspace..."
     rm -f go.work go.work.sum
-    go work init . ./transports/redis ./transports/sqlite
+    go work init . ./transports/redis ./transports/sqlite ./transports/postgres
 
     log_info "Syncing workspace dependencies..."
     go work sync
@@ -126,10 +127,20 @@ cmd_test_docker() {
 
 cmd_test_redis_only() {
     log_info "Running Redis transport tests in Docker..."
-    docker compose run --rm test sh -c \
+    docker compose up -d --wait redis
+    docker compose run --rm --no-deps test sh -c \
         "cd /app/transports/redis && go mod download && go test -v -race ./..."
     docker compose down
     log_info "Redis-only tests complete."
+}
+
+cmd_test_postgres_only() {
+    log_info "Running Postgres transport tests in Docker..."
+    docker compose up -d --wait postgres
+    docker compose run --rm --no-deps test sh -c \
+        "cd /app/transports/postgres && go mod download && go test -v -race ./..."
+    docker compose down
+    log_info "Postgres-only tests complete."
 }
 
 cmd_ci() {
@@ -252,8 +263,9 @@ Commands:
   setup       Initialize Go workspace, sync deps, tidy all modules
   test        Run all tests with -race in all modules
   test-short  Run tests with -short flag (skips integration tests)
-  test-docker Run all tests via Docker Compose (includes Redis)
+  test-docker Run all tests via Docker Compose (includes Redis and Postgres)
   test-redis-only Run only Redis transport tests via Docker Compose
+  test-postgres-only Run only Postgres transport tests via Docker Compose
   tidy        Run 'go mod tidy' in all modules and sync workspace
   build       Build all packages in all modules
   vet         Run 'go vet' in all modules
@@ -268,6 +280,7 @@ Modules managed:
   .                          (root module: core + fake transport)
   ./transports/redis         (Redis transport submodule)
   ./transports/sqlite        (SQLite transport submodule)
+  ./transports/postgres      (Postgres transport submodule)
 EOF
 }
 
@@ -283,6 +296,7 @@ main() {
         test-short)       cmd_test_short ;;
         test-docker)      cmd_test_docker ;;
         test-redis-only)  cmd_test_redis_only ;;
+        test-postgres-only) cmd_test_postgres_only ;;
         tidy)             cmd_tidy ;;
         build)            cmd_build ;;
         vet)              cmd_vet ;;
