@@ -3,6 +3,7 @@ package transports
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/ieshan/idx"
 	"github.com/ieshan/nakusp/models"
@@ -38,27 +39,36 @@ func (t *FakeTransport) Heartbeat(ctx context.Context, _ idx.ID) error {
 
 // Consume continually drains the in-memory queue, waiting briefly when no jobs are available.
 func (t *FakeTransport) Consume(ctx context.Context, _ idx.ID, jobQueue chan *models.Job) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			t.mu.Lock()
-			if len(t.Jobs) > 0 {
-				jobs := make([]*models.Job, len(t.Jobs))
-				copy(jobs, t.Jobs)
-				t.Jobs = nil
-				t.mu.Unlock()
+		}
 
-				for _, job := range jobs {
-					select {
-					case jobQueue <- job:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-				}
-			} else {
-				t.mu.Unlock()
+		t.mu.Lock()
+		if len(t.Jobs) == 0 {
+			t.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+			continue
+		}
+		jobs := make([]*models.Job, len(t.Jobs))
+		copy(jobs, t.Jobs)
+		t.Jobs = nil
+		t.mu.Unlock()
+
+		for _, job := range jobs {
+			select {
+			case jobQueue <- job:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
@@ -66,6 +76,8 @@ func (t *FakeTransport) Consume(ctx context.Context, _ idx.ID, jobQueue chan *mo
 
 // ConsumeAll sends all jobs from the in-memory queue to the jobQueue and then closes the channel.
 func (t *FakeTransport) ConsumeAll(ctx context.Context, _ idx.ID, jobQueue chan *models.Job) error {
+	defer close(jobQueue)
+
 	t.mu.Lock()
 	jobs := make([]*models.Job, len(t.Jobs))
 	copy(jobs, t.Jobs)
@@ -76,12 +88,10 @@ func (t *FakeTransport) ConsumeAll(ctx context.Context, _ idx.ID, jobQueue chan 
 		select {
 		case jobQueue <- job:
 		case <-ctx.Done():
-			close(jobQueue)
 			return ctx.Err()
 		}
 	}
 
-	close(jobQueue)
 	return nil
 }
 

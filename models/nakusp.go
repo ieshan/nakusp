@@ -59,7 +59,7 @@ type Transport interface {
 	// This method should block until the context is cancelled.
 	Heartbeat(ctx context.Context, id idx.ID) error
 
-	// ConsumeAll consumes all jobs from the queue and cancels the jobQueue channel after all jobs are consumed.
+	// ConsumeAll consumes all jobs from the queue and closes the jobQueue channel after all jobs are consumed.
 	ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *Job) error
 
 	// Consume runs in a loop, continuously retrieving jobs from the queue and sending them to jobQueue.

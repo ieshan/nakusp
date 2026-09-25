@@ -178,8 +178,12 @@ func (t *SQLiteTransport) fetchOnce(ctx context.Context, id idx.ID, jobQueue cha
 		return false, scanErr
 	}
 
-	jobQueue <- &job
-	fetched = true
+	select {
+	case jobQueue <- &job:
+		fetched = true
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 
 	if err = tx.Commit(); err != nil {
 		return false, err
@@ -210,45 +214,60 @@ func (t *SQLiteTransport) Completed(ctx context.Context, job *models.Job) error 
 	return err
 }
 
-// ConsumeAll consumes all jobs from the queue and sends them to the job channel.
-// It fetches all jobs with 'queued' status, sends them to the jobQueue, and then closes the channel.
-// The method respects context cancellation and will stop processing if the context is cancelled.
-func (t *SQLiteTransport) ConsumeAll(ctx context.Context, _ idx.ID, jobQueue chan *models.Job) error {
+// ConsumeAll claims all queued jobs under a per-call token and sends them to
+// the jobQueue, then closes the channel. The claim is a single atomic UPDATE so
+// concurrent consumers can never receive the same job. Jobs claimed but not yet
+// sent when ctx is cancelled are returned to the 'queued' state.
+func (t *SQLiteTransport) ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *models.Job) error {
 	defer close(jobQueue)
 
-	rows, err := t.db.QueryContext(ctx, "SELECT id, name, payload, retry_count FROM jobs WHERE status = 'queued' ORDER BY created_at ASC")
+	claimID := fmt.Sprintf("%s:%s", id, idx.NewID())
+	lockedUntil := time.Now().Add(5 * time.Minute)
+
+	rows, err := t.db.QueryContext(
+		ctx,
+		`WITH next_jobs AS (
+			SELECT id FROM jobs WHERE status = 'queued' ORDER BY created_at ASC
+		)
+		UPDATE jobs
+		SET status = 'in_progress', worker_id = ?, locked_until = ?
+		WHERE id IN (SELECT id FROM next_jobs)
+		RETURNING id, name, payload, retry_count`,
+		claimID, lockedUntil,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to query jobs: %w", err)
+		return fmt.Errorf("failed to claim queued jobs: %w", err)
 	}
 
 	for rows.Next() {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		var job models.Job
 		if err = rows.Scan(&job.ID, &job.Name, &job.Payload, &job.RetryCount); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("failed to scan job: %w", err)
 		}
-
 		select {
 		case jobQueue <- &job:
 		case <-ctx.Done():
+			// Close rows first — it holds the only connection.
+			_ = rows.Close()
+			t.requeueClaimed(context.WithoutCancel(ctx), claimID)
 			return ctx.Err()
 		}
 	}
-
 	if err = rows.Err(); err != nil {
+		_ = rows.Close()
 		return fmt.Errorf("error iterating over rows: %w", err)
 	}
-	if err = rows.Close(); err != nil {
-		return fmt.Errorf("error closing rows: %w", err)
-	}
+	return rows.Close()
+}
 
-	return nil
+// requeueClaimed returns a claim's unprocessed in_progress jobs to queued.
+func (t *SQLiteTransport) requeueClaimed(ctx context.Context, claimID string) {
+	_, _ = t.db.ExecContext(
+		ctx,
+		`UPDATE jobs SET status = 'queued', worker_id = NULL, locked_until = NULL WHERE status = 'in_progress' AND worker_id = ?`,
+		claimID,
+	)
 }
 
 // Close closes the transport

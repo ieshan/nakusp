@@ -143,6 +143,8 @@ func (t *RedisTransport) Consume(ctx context.Context, id idx.ID, jobQueue chan *
 // ConsumeAll fetches all available jobs from the 'todo' queue and sends them to the jobQueue.
 // It continues to fetch jobs until the queue is empty, and then closes the jobQueue channel.
 func (t *RedisTransport) ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *models.Job) error {
+	defer close(jobQueue)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -162,7 +164,6 @@ func (t *RedisTransport) ConsumeAll(ctx context.Context, id idx.ID, jobQueue cha
 			break
 		}
 	}
-	close(jobQueue)
 	return nil
 }
 
@@ -191,14 +192,25 @@ func (t *RedisTransport) fetchAndProcessTasks(ctx context.Context, id string, jo
 	}
 
 	count := 0
-	for _, task := range tasks {
+	for i, task := range tasks {
 		job, err = parseJobPayload(task)
 		if err != nil {
 			// Skip malformed jobs
 			continue
 		}
-		jobQueue <- job
-		count++
+		select {
+		case jobQueue <- job:
+			count++
+		case <-ctx.Done():
+			// Best-effort: return claimed-but-unsent jobs to the todo queue.
+			bg := context.WithoutCancel(ctx)
+			for ; i < len(tasks); i++ {
+				if rj, rerr := parseJobPayload(tasks[i]); rerr == nil {
+					_ = t.Requeue(bg, rj)
+				}
+			}
+			return count, ctx.Err()
+		}
 	}
 
 	return count, nil

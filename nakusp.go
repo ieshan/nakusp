@@ -5,10 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/ieshan/idx"
@@ -30,7 +27,6 @@ type Nakusp struct {
 	transportHandlers map[string]string
 	lock              *sync.RWMutex
 	wg                *sync.WaitGroup
-	jobQueue          chan *models.Job
 	transports        map[string]models.Transport
 	schedules         map[string]time.Duration
 }
@@ -45,9 +41,19 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 			GracefulTimeout:    time.Second * 5,
 		}
 	}
-	if transports == nil {
-		transports = map[string]models.Transport{
-			DefaultTransport: trnspt.NewFake(),
+	ts := make(map[string]models.Transport, len(transports)+1)
+	for name, t := range transports {
+		ts[name] = t
+	}
+	if len(ts) == 0 {
+		ts[DefaultTransport] = trnspt.NewFake()
+	} else if _, ok := ts[DefaultTransport]; !ok {
+		if len(ts) == 1 {
+			for _, t := range ts {
+				ts[DefaultTransport] = t
+			}
+		} else {
+			slog.Warn("no default transport configured; unrouted tasks will fail to publish")
 		}
 	}
 
@@ -58,8 +64,7 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 		transportHandlers: make(map[string]string),
 		lock:              &sync.RWMutex{},
 		wg:                &sync.WaitGroup{},
-		jobQueue:          make(chan *models.Job, config.MaxWorkers),
-		transports:        transports,
+		transports:        ts,
 		schedules:         make(map[string]time.Duration),
 	}
 }
@@ -67,6 +72,32 @@ func NewNakusp(config *models.Config, transports map[string]models.Transport) *N
 // ID returns the unique identifier for the Nakusp worker instance.
 func (n *Nakusp) ID() idx.ID {
 	return n.id
+}
+
+// transport returns the transport registered under name.
+func (n *Nakusp) transport(name string) (models.Transport, error) {
+	n.lock.RLock()
+	defer n.lock.RUnlock()
+	t, ok := n.transports[name]
+	if !ok || t == nil {
+		return nil, fmt.Errorf("transport %q not found", name)
+	}
+	return t, nil
+}
+
+// transportForTask resolves the transport a task is bound to, falling back to the default.
+func (n *Nakusp) transportForTask(taskName string) (models.Transport, error) {
+	n.lock.RLock()
+	defer n.lock.RUnlock()
+	transportName, ok := n.transportHandlers[taskName]
+	if !ok {
+		transportName = DefaultTransport
+	}
+	t, ok := n.transports[transportName]
+	if !ok || t == nil {
+		return nil, fmt.Errorf("transport %q not found for task %q", transportName, taskName)
+	}
+	return t, nil
 }
 
 // AddHandler registers a handler for a given task name.
@@ -80,18 +111,27 @@ func (n *Nakusp) AddHandler(taskName string, handler models.Handler) error {
 	return nil
 }
 
+// BindTransport routes a task to a named transport instead of the default.
+// Jobs for the task are consumed by workers started on that transport.
+func (n *Nakusp) BindTransport(taskName, transportName string) error {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	if t, ok := n.transports[transportName]; !ok || t == nil {
+		return fmt.Errorf("transport %q not found", transportName)
+	}
+	n.transportHandlers[taskName] = transportName
+	return nil
+}
+
 // Publish sends a new job to the appropriate transport based on the task name.
 // If no specific transport is registered for the task, it uses the default transport.
 func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (idx.ID, error) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
-
-	transportName, ok := n.transportHandlers[taskName]
-	if !ok {
-		transportName = DefaultTransport
-	}
 	taskId := idx.NewID()
-	return taskId, n.transports[transportName].Publish(ctx, &models.Job{
+	transport, err := n.transportForTask(taskName)
+	if err != nil {
+		return taskId, err
+	}
+	return taskId, transport.Publish(ctx, &models.Job{
 		ID:         taskId,
 		Name:       taskName,
 		Payload:    payload,
@@ -100,36 +140,60 @@ func (n *Nakusp) Publish(ctx context.Context, taskName string, payload string) (
 }
 
 // ConsumeAll consumes all jobs from the specified transport and processes them.
-// It starts a consumer goroutine that fetches all jobs and puts them into the job queue.
-// It then waits for all jobs to be processed by the workers before returning.
-func (n *Nakusp) ConsumeAll(transportName string) error {
-	n.lock.RLock()
-	transport := n.transports[transportName]
-	n.wg = &sync.WaitGroup{}
-	n.lock.RUnlock()
+// The transport closes jobQueue when done; we drain buffered jobs and return
+// the transport's error. Cancel ctx to abort.
+func (n *Nakusp) ConsumeAll(ctx context.Context, transportName string) error {
+	transport, err := n.transport(transportName)
+	if err != nil {
+		return err
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Use a channel to receive the error from the consumer goroutine
+	jobQueue := make(chan *models.Job, n.config.MaxWorkers)
 	errChan := make(chan error, 1)
+	var wg sync.WaitGroup
 
-	go func() {
-		errChan <- transport.ConsumeAll(ctx, n.id, n.jobQueue)
-	}()
-
-	for j := range n.jobQueue {
-		n.wg.Add(1)
+	dispatch := func(job *models.Job) {
+		wg.Add(1)
 		go func(job *models.Job) {
-			defer n.wg.Done()
+			defer wg.Done()
 			if err := n.ExecuteJob(ctx, transport, job); err != nil {
 				slog.Error("job execution error", slog.Any("error", err))
 			}
-		}(j)
+		}(job)
 	}
-	n.wg.Wait()
 
-	// Get the error from the consumer goroutine
+	go func() {
+		errChan <- transport.ConsumeAll(ctx, n.id, jobQueue)
+	}()
+
+	for jobQueue != nil {
+		select {
+		case job, ok := <-jobQueue:
+			if !ok {
+				jobQueue = nil
+				continue
+			}
+			dispatch(job)
+		case err := <-errChan:
+			// Transport finished without closing the channel — drain what's
+			// buffered, then finish. (Contract says transports close the
+			// channel; this guards against implementations that don't.)
+			for {
+				select {
+				case job, ok := <-jobQueue:
+					if !ok {
+						wg.Wait()
+						return err
+					}
+					dispatch(job)
+				default:
+					wg.Wait()
+					return err
+				}
+			}
+		}
+	}
+	wg.Wait()
 	return <-errChan
 }
 
@@ -137,24 +201,24 @@ func (n *Nakusp) ConsumeAll(transportName string) error {
 // It listens for jobs and executes them in separate goroutines.
 // If scheduled tasks are registered, it also starts a scheduler goroutine
 // that publishes jobs at their configured intervals using a single timer-based approach.
-func (n *Nakusp) StartWorker(transportName string) error {
-	n.lock.RLock()
-	transport := n.transports[transportName]
-	n.lock.RUnlock()
+//
+// The worker runs until ctx is cancelled; the caller owns signal handling.
+// On cancellation it waits up to config.GracefulTimeout for in-flight work
+// to finish before returning.
+func (n *Nakusp) StartWorker(ctx context.Context, transportName string) error {
+	transport, err := n.transport(transportName)
+	if err != nil {
+		return err
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGABRT, syscall.SIGTERM)
+	jobQueue := make(chan *models.Job, n.config.MaxWorkers)
 
 	n.wg.Add(2)
 	go n.RunUntilCancelled(ctx, transport.Heartbeat)
 	go n.RunUntilCancelled(
 		ctx,
 		func(ctx context.Context, id idx.ID) error {
-			return transport.Consume(ctx, id, n.jobQueue)
+			return transport.Consume(ctx, id, jobQueue)
 		},
 	)
 
@@ -170,7 +234,7 @@ func (n *Nakusp) StartWorker(transportName string) error {
 
 	for {
 		select {
-		case job := <-n.jobQueue:
+		case job := <-jobQueue:
 			n.wg.Add(1)
 			go func(job *models.Job) {
 				defer n.wg.Done()
@@ -178,11 +242,15 @@ func (n *Nakusp) StartWorker(transportName string) error {
 					slog.Error("job execution error", slog.Any("error", err))
 				}
 			}(job)
-		case <-sigChan:
-			slog.Debug("got exit signal in StartWorker")
-			cancel()
-			n.wg.Wait()
-			close(n.jobQueue)
+		case <-ctx.Done():
+			done := make(chan struct{})
+			go func() { n.wg.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(n.config.GracefulTimeout):
+				slog.Warn("graceful shutdown timed out",
+					slog.Duration("timeout", n.config.GracefulTimeout))
+			}
 			return nil
 		}
 	}
@@ -209,40 +277,63 @@ func (n *Nakusp) RunUntilCancelled(ctx context.Context, handlerFn func(context.C
 
 // ExecuteJob processes a single job. It finds the appropriate handler and executes it.
 // It handles retries, and moving jobs to the DLQ based on the handler's outcome.
-func (n *Nakusp) ExecuteJob(ctx context.Context, transport models.Transport, job *models.Job) error {
+// A missing handler or a handler panic sends the job to the DLQ. Bookkeeping
+// calls (Requeue/Completed/SendToDLQ) run on a context detached from ctx so a
+// cancelled worker context cannot strand an in-flight job.
+func (n *Nakusp) ExecuteJob(ctx context.Context, transport models.Transport, job *models.Job) (err error) {
 	n.lock.RLock()
 	hf, ok := n.handlers[job.Name]
 	n.lock.RUnlock()
 
-	var err error
+	bg := context.WithoutCancel(ctx)
+
 	if !ok {
 		err = fmt.Errorf("handler '%s' not found", job.Name)
 		slog.Error("error in ExecuteJob", slog.Any("error", err))
+		if dlqErr := transport.SendToDLQ(bg, job); dlqErr != nil {
+			return errors.Join(err, dlqErr)
+		}
 		return err
 	}
 
 	select {
 	case <-ctx.Done():
-		return transport.Requeue(ctx, job)
+		return transport.Requeue(bg, job)
 	default:
-		err = hf.Func(job)
-		if err != nil {
-			if job.RetryCount < hf.MaxRetry {
-				job.RetryCount++
-				err = transport.Requeue(ctx, job)
-			} else {
-				err = transport.SendToDLQ(ctx, job)
-			}
-		} else {
-			err = transport.Completed(ctx, job)
-		}
-		return err
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("handler '%s' panicked: %v", job.Name, r)
+			slog.Error("handler panic", slog.Any("error", err))
+			if dlqErr := transport.SendToDLQ(bg, job); dlqErr != nil {
+				err = errors.Join(err, dlqErr)
+			}
+		}
+	}()
+
+	if err = hf.Func(job); err != nil {
+		if job.RetryCount < hf.MaxRetry {
+			job.RetryCount++
+			err = transport.Requeue(bg, job)
+		} else {
+			err = transport.SendToDLQ(bg, job)
+		}
+	} else {
+		err = transport.Completed(bg, job)
+	}
+	return err
 }
 
 // Close closes all transports and releases any resources.
+// Transports registered under multiple names are closed only once.
 func (n *Nakusp) Close(ctx context.Context) error {
+	seen := make(map[models.Transport]bool, len(n.transports))
 	for _, transport := range n.transports {
+		if seen[transport] {
+			continue
+		}
+		seen[transport] = true
 		if err := transport.Close(ctx); err != nil {
 			return err
 		}
