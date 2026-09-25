@@ -1,0 +1,288 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token — no job writes to the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch/PR to avoid wasting CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: root,   dir: "." }
+          - { name: redis,  dir: "transports/redis" }
+          - { name: sqlite, dir: "transports/sqlite" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Each module's go.mod is the source of truth for its Go version.
+          go-version-file: ${{ matrix.module.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module.dir }}/go.sum
+
+      # Pinned to v2.13.2 to match the gocheck image (AGENTS.md).
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: ${{ matrix.module.dir }}
+
+  test:
+    name: test (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: root,   dir: "." }
+          - { name: redis,  dir: "transports/redis" }
+          - { name: sqlite, dir: "transports/sqlite" }
+    defaults:
+      run:
+        working-directory: ${{ matrix.module.dir }}
+    # Service containers are per job-instance, not per matrix cell — the
+    # container also starts for root/sqlite cells, which ignore REDIS_URI.
+    services:
+      dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.0
+        ports:
+          - 6379:6379
+        # Same memlock ulimit as compose.yml.
+        options: --ulimit memlock=-1
+    env:
+      REDIS_URI: redis://localhost:6379/0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module.dir }}/go.sum
+
+      # No --health-cmd: the dragonfly image isn't guaranteed to ship
+      # redis-cli, so wait on the TCP port explicitly.
+      - name: Wait for Dragonfly
+        if: matrix.module.name == 'redis'
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/localhost/6379) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "Dragonfly did not accept connections" && exit 1
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # shadow and nilness are the two extra analyzers AGENTS.md requires
+      # beyond standard `go vet`, pinned to the gocheck image's x/tools.
+      - name: Install shadow and nilness analyzers
+        run: |
+          go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow@v0.49.0
+          go install golang.org/x/tools/go/analysis/passes/nilness/cmd/nilness@v0.49.0
+
+      - name: Vet (shadow)
+        run: go vet -vettool="$(go env GOPATH)/bin/shadow" ./...
+
+      - name: Vet (nilness)
+        run: go vet -vettool="$(go env GOPATH)/bin/nilness" ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+  test-race:
+    name: test-race (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: root,   dir: "." }
+          - { name: redis,  dir: "transports/redis" }
+          - { name: sqlite, dir: "transports/sqlite" }
+    defaults:
+      run:
+        working-directory: ${{ matrix.module.dir }}
+    services:
+      dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.0
+        ports:
+          - 6379:6379
+        options: --ulimit memlock=-1
+    env:
+      REDIS_URI: redis://localhost:6379/0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module.dir }}/go.sum
+
+      - name: Wait for Dragonfly
+        if: matrix.module.name == 'redis'
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/localhost/6379) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "Dragonfly did not accept connections" && exit 1
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  # Pinned binary instead of golang/govulncheck-action: the composite action
+  # hardcodes @latest, and v1.7.0 matches the gocheck image pin.
+  govulncheck:
+    name: govulncheck (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: root,   dir: "." }
+          - { name: redis,  dir: "transports/redis" }
+          - { name: sqlite, dir: "transports/sqlite" }
+    defaults:
+      run:
+        working-directory: ${{ matrix.module.dir }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module.dir }}/go.sum
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
+      - name: govulncheck
+        run: govulncheck ./...
+
+  # Pinned to v2.29.0 to match the gocheck image (AGENTS.md).
+  gosec:
+    name: gosec (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: root,   dir: "." }
+          - { name: redis,  dir: "transports/redis" }
+          - { name: sqlite, dir: "transports/sqlite" }
+    defaults:
+      run:
+        working-directory: ${{ matrix.module.dir }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module.dir }}/go.sum
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+
+      - name: gosec
+        run: gosec ./...
+
+  # nilaway's matrix is the only one that needs the module's package path
+  # for -include-pkgs; other jobs only need name+dir.
+  nilaway:
+    name: nilaway (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: root,   dir: ".",                pkg: "github.com/ieshan/nakusp" }
+          - { name: redis,  dir: "transports/redis",  pkg: "github.com/ieshan/nakusp/transports/redis" }
+          - { name: sqlite, dir: "transports/sqlite", pkg: "github.com/ieshan/nakusp/transports/sqlite" }
+    defaults:
+      run:
+        working-directory: ${{ matrix.module.dir }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module.dir }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module.dir }}/go.sum
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Install NilAway
+        run: go install go.uber.org/nilaway/cmd/nilaway@latest
+
+      - name: NilAway
+        run: nilaway -include-pkgs="${{ matrix.module.pkg }}" ./...
+
+  # Single required check for branch protection: one `ci` check instead of
+  # enumerating all 18 matrix cells. if: always() + explicit result check —
+  # without it a failed dependency would leave this job "skipped", which a
+  # required check can treat as neutral.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    needs: [lint, test, test-race, govulncheck, gosec, nilaway]
+    if: always()
+    steps:
+      - name: Verify all jobs succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          failed=$(jq -r 'to_entries[] | select(.value.result != "success") | .key' <<< "$RESULTS")
+          if [ -n "$failed" ]; then
+            echo "::error::Jobs failed or were cancelled: $failed"
+            exit 1
+          fi
+          echo "All CI jobs succeeded"

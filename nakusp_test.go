@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ieshan/idx"
@@ -47,6 +48,28 @@ func (nt *nakuspTest) setup(t *testing.T) {
 		&models.Config{MaxWorkers: 5, DefaultTaskRuntime: 600, GracefulTimeout: time.Second},
 		map[string]models.Transport{DefaultTransport: nt.fakeTransport},
 	)
+}
+
+// noCloseTransport violates the Transport.ConsumeAll contract: it returns
+// without closing jobQueue. Nakusp.ConsumeAll must not hang on it.
+type noCloseTransport struct{ *transports.FakeTransport }
+
+func (t *noCloseTransport) ConsumeAll(_ context.Context, _ idx.ID, _ chan *models.Job) error {
+	return errors.New("boom")
+}
+
+// countingCloseTransport records how many times Close is invoked.
+type countingCloseTransport struct {
+	*transports.FakeTransport
+	mu     sync.Mutex
+	closes int
+}
+
+func (c *countingCloseTransport) Close(ctx context.Context) error {
+	c.mu.Lock()
+	c.closes++
+	c.mu.Unlock()
+	return c.FakeTransport.Close(ctx)
 }
 
 func TestNakusp(t *testing.T) {
@@ -242,6 +265,59 @@ func TestNakusp(t *testing.T) {
 		}
 	})
 
+	t.Run("ExecuteJobMissingHandlerSendsToDLQ", func(t *testing.T) {
+		var nt nakuspTest
+		nt.setup(t)
+		ctx := context.Background()
+
+		job := &models.Job{ID: idx.NewID(), Name: "no-handler", Payload: "payload"}
+		if err := nt.fakeTransport.Publish(ctx, job); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+
+		err := nt.n.ExecuteJob(ctx, nt.fakeTransport, job)
+		if err == nil {
+			t.Fatal("expected error for missing handler, got nil")
+		}
+
+		if len(nt.fakeTransport.Dlq) != 1 {
+			t.Fatalf("expected 1 job in DLQ, got %d", len(nt.fakeTransport.Dlq))
+		}
+		if nt.fakeTransport.Dlq[0].ID != job.ID {
+			t.Fatalf("expected job %s in DLQ, got %s", job.ID, nt.fakeTransport.Dlq[0].ID)
+		}
+	})
+
+	t.Run("ExecuteJobHandlerPanicSendsToDLQ", func(t *testing.T) {
+		var nt nakuspTest
+		nt.setup(t)
+		ctx := context.Background()
+
+		handler := models.Handler{
+			MaxRetry: 3,
+			Func:     func(job *models.Job) error { panic("boom") },
+		}
+		if err := nt.n.AddHandler("panic-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
+
+		job := &models.Job{ID: idx.NewID(), Name: "panic-task", Payload: "payload"}
+		err := nt.n.ExecuteJob(ctx, nt.fakeTransport, job)
+		if err == nil {
+			t.Fatal("expected error from panicking handler, got nil")
+		}
+		if !strings.Contains(err.Error(), "panicked") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(nt.fakeTransport.Dlq) != 1 {
+			t.Fatalf("expected 1 job in DLQ, got %d", len(nt.fakeTransport.Dlq))
+		}
+		if nt.fakeTransport.Dlq[0].ID != job.ID {
+			t.Fatalf("expected job %s in DLQ, got %s", job.ID, nt.fakeTransport.Dlq[0].ID)
+		}
+	})
+
 	t.Run("ConsumeAll", func(t *testing.T) {
 		var nt nakuspTest
 		nt.setup(t)
@@ -272,7 +348,7 @@ func TestNakusp(t *testing.T) {
 		}
 
 		go func() {
-			if err := nt.n.ConsumeAll(DefaultTransport); err != nil {
+			if err := nt.n.ConsumeAll(ctx, DefaultTransport); err != nil {
 				t.Errorf("ConsumeAll returned an error: %v", err)
 			}
 		}()
@@ -286,10 +362,197 @@ func TestNakusp(t *testing.T) {
 		}
 	})
 
+	t.Run("PublishErrorsWhenDefaultTransportMissing", func(t *testing.T) {
+		n := NewNakusp(nil, map[string]models.Transport{
+			"a": transports.NewFake(),
+			"b": transports.NewFake(),
+		})
+
+		_, err := n.Publish(context.Background(), "test-task", "payload")
+		if err == nil {
+			t.Fatal("expected error when default transport is missing, got nil")
+		}
+		if !strings.Contains(err.Error(), `transport "default" not found`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("BindTransportRoutesTask", func(t *testing.T) {
+		fakeDefault := transports.NewFake()
+		fakeSecond := transports.NewFake()
+		n := NewNakusp(nil, map[string]models.Transport{
+			DefaultTransport: fakeDefault,
+			"second":         fakeSecond,
+		})
+
+		if err := n.BindTransport("bound-task", "second"); err != nil {
+			t.Fatalf("BindTransport returned error: %v", err)
+		}
+
+		ctx := context.Background()
+		if _, err := n.Publish(ctx, "bound-task", "payload"); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+		if _, err := n.Publish(ctx, "unbound-task", "payload"); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+
+		if len(fakeSecond.Jobs) != 1 || fakeSecond.Jobs[0].Name != "bound-task" {
+			t.Fatalf("expected bound-task on second transport, got %v", fakeSecond.Jobs)
+		}
+		if len(fakeDefault.Jobs) != 1 || fakeDefault.Jobs[0].Name != "unbound-task" {
+			t.Fatalf("expected unbound-task on default transport, got %v", fakeDefault.Jobs)
+		}
+	})
+
+	t.Run("BindTransportUnknownTransport", func(t *testing.T) {
+		var nt nakuspTest
+		nt.setup(t)
+
+		err := nt.n.BindTransport("task", "nonexistent")
+		if err == nil {
+			t.Fatal("expected error for unknown transport, got nil")
+		}
+		if !strings.Contains(err.Error(), `transport "nonexistent" not found`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("SingleTransportAliasedAsDefault", func(t *testing.T) {
+		solo := &countingCloseTransport{FakeTransport: transports.NewFake()}
+		n := NewNakusp(nil, map[string]models.Transport{"solo": solo})
+
+		if _, err := n.Publish(context.Background(), "test-task", "payload"); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+		if len(solo.Jobs) != 1 {
+			t.Fatalf("expected job published to aliased transport, got %d jobs", len(solo.Jobs))
+		}
+
+		if err := n.Close(context.Background()); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+		solo.mu.Lock()
+		closes := solo.closes
+		solo.mu.Unlock()
+		if closes != 1 {
+			t.Fatalf("expected Close to run once, got %d", closes)
+		}
+	})
+
+	t.Run("EmptyTransportMapGetsFakeDefault", func(t *testing.T) {
+		n := NewNakusp(nil, map[string]models.Transport{})
+		if _, err := n.Publish(context.Background(), "test-task", "payload"); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+	})
+
+	t.Run("NewNakuspDoesNotMutateCallerMap", func(t *testing.T) {
+		callerMap := map[string]models.Transport{"solo": transports.NewFake()}
+		_ = NewNakusp(nil, callerMap)
+		if _, ok := callerMap[DefaultTransport]; ok {
+			t.Fatal("NewNakusp mutated the caller's transports map")
+		}
+	})
+
+	t.Run("ConsumeAllUnknownTransport", func(t *testing.T) {
+		var nt nakuspTest
+		nt.setup(t)
+
+		err := nt.n.ConsumeAll(context.Background(), "nonexistent")
+		if err == nil {
+			t.Fatal("expected error for unknown transport, got nil")
+		}
+		if !strings.Contains(err.Error(), `transport "nonexistent" not found`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("ConsumeAllConcurrentTransports", func(t *testing.T) {
+		fakeDefault := transports.NewFake()
+		fakeSecond := transports.NewFake()
+		n := NewNakusp(
+			&models.Config{MaxWorkers: 5, DefaultTaskRuntime: 600, GracefulTimeout: time.Second},
+			map[string]models.Transport{DefaultTransport: fakeDefault, "second": fakeSecond},
+		)
+
+		var mu sync.Mutex
+		processed := make(map[idx.ID]bool)
+		handler := models.Handler{
+			MaxRetry: 0,
+			Func: func(job *models.Job) error {
+				mu.Lock()
+				processed[job.ID] = true
+				mu.Unlock()
+				return nil
+			},
+		}
+		if err := n.AddHandler("test-task", handler); err != nil {
+			t.Fatalf("AddHandler returned error: %v", err)
+		}
+
+		ctx := context.Background()
+		jobIDs := make(map[idx.ID]bool)
+		for _, ft := range []*transports.FakeTransport{fakeDefault, fakeSecond} {
+			for i := 0; i < 2; i++ {
+				job := &models.Job{ID: idx.NewID(), Name: "test-task", Payload: "payload"}
+				if err := ft.Publish(ctx, job); err != nil {
+					t.Fatalf("Publish returned error: %v", err)
+				}
+				jobIDs[job.ID] = true
+			}
+		}
+
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+		go func() { defer wg.Done(); errs[0] = n.ConsumeAll(ctx, DefaultTransport) }()
+		go func() { defer wg.Done(); errs[1] = n.ConsumeAll(ctx, "second") }()
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("ConsumeAll %d returned error: %v", i, err)
+			}
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(processed) != len(jobIDs) {
+			t.Fatalf("expected %d jobs processed, got %d", len(jobIDs), len(processed))
+		}
+		for id := range jobIDs {
+			if !processed[id] {
+				t.Fatalf("job %s was not processed", id)
+			}
+		}
+	})
+
+	t.Run("ConsumeAllSurvivesContractViolation", func(t *testing.T) {
+		n := NewNakusp(nil, map[string]models.Transport{
+			DefaultTransport: &noCloseTransport{FakeTransport: transports.NewFake()},
+		})
+
+		done := make(chan error, 1)
+		go func() {
+			done <- n.ConsumeAll(context.Background(), DefaultTransport)
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil || err.Error() != "boom" {
+				t.Fatalf("expected 'boom' error, got %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("ConsumeAll hung on a transport that returned without closing jobQueue")
+		}
+	})
+
 	t.Run("ScheduleDirectPublish", func(t *testing.T) {
 		var nt nakuspTest
 		nt.setup(t)
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 
 		executionChan := make(chan struct{}, 10)
 		handler := models.Handler{
@@ -305,7 +568,7 @@ func TestNakusp(t *testing.T) {
 
 		// Start worker in background
 		go func() {
-			_ = nt.n.StartWorker(DefaultTransport)
+			_ = nt.n.StartWorker(ctx, DefaultTransport)
 		}()
 
 		// Give worker time to start
@@ -346,9 +609,12 @@ func TestNakusp(t *testing.T) {
 			t.Fatalf("AddSchedule returned error: %v", err)
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
 		// Start worker in background (it will run until test ends)
 		go func() {
-			_ = nt.n.StartWorker(DefaultTransport)
+			_ = nt.n.StartWorker(ctx, DefaultTransport)
 		}()
 
 		// Wait for at least 2 executions
@@ -416,9 +682,12 @@ func TestNakusp(t *testing.T) {
 			}
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
 		// Start worker in background
 		go func() {
-			_ = nt.n.StartWorker(DefaultTransport)
+			_ = nt.n.StartWorker(ctx, DefaultTransport)
 		}()
 
 		// Give worker time to start
@@ -486,9 +755,12 @@ func TestNakusp(t *testing.T) {
 			t.Fatalf("AddSchedule returned error: %v", err)
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
 		// Start worker in background
 		go func() {
-			_ = nt.n.StartWorker(DefaultTransport)
+			_ = nt.n.StartWorker(ctx, DefaultTransport)
 		}()
 
 		// Give worker time to start
@@ -527,9 +799,12 @@ func TestNakusp(t *testing.T) {
 			t.Fatalf("AddSchedule returned error: %v", err)
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
 		// Start worker in background
 		go func() {
-			_ = nt.n.StartWorker(DefaultTransport)
+			_ = nt.n.StartWorker(ctx, DefaultTransport)
 		}()
 
 		// Give worker time to start
@@ -544,6 +819,72 @@ func TestNakusp(t *testing.T) {
 
 		if finalCount < 2 {
 			t.Fatalf("expected at least 2 executions, got %d", finalCount)
+		}
+	})
+
+	t.Run("StartWorkerStopsOnContextCancel", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var nt nakuspTest
+			nt.setup(t)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- nt.n.StartWorker(ctx, DefaultTransport) }()
+
+			synctest.Wait()
+			cancel()
+
+			if err := <-done; err != nil {
+				t.Fatalf("StartWorker returned error: %v", err)
+			}
+		})
+	})
+
+	t.Run("StartWorkerGracefulShutdownTimeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			fake := transports.NewFake()
+			n := NewNakusp(
+				&models.Config{MaxWorkers: 5, DefaultTaskRuntime: 600, GracefulTimeout: 50 * time.Millisecond},
+				map[string]models.Transport{DefaultTransport: fake},
+			)
+			release := make(chan struct{})
+			if err := n.AddHandler("slow-task", models.Handler{
+				MaxRetry: 0,
+				Func:     func(*models.Job) error { <-release; return nil },
+			}); err != nil {
+				t.Fatalf("AddHandler returned error: %v", err)
+			}
+			if err := fake.Publish(context.Background(), &models.Job{ID: idx.NewID(), Name: "slow-task"}); err != nil {
+				t.Fatalf("Publish returned error: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- n.StartWorker(ctx, DefaultTransport) }()
+
+			synctest.Wait() // job picked up; handler blocked on release
+			cancel()
+
+			// wg can't drain while the handler blocks — StartWorker must return
+			// via the 50ms GracefulTimeout on the fake clock.
+			if err := <-done; err != nil {
+				t.Fatalf("StartWorker returned error: %v", err)
+			}
+			close(release)
+			synctest.Wait()
+		})
+	})
+
+	t.Run("StartWorkerUnknownTransport", func(t *testing.T) {
+		var nt nakuspTest
+		nt.setup(t)
+
+		err := nt.n.StartWorker(context.Background(), "nonexistent")
+		if err == nil {
+			t.Fatal("expected error for unknown transport, got nil")
+		}
+		if !strings.Contains(err.Error(), `transport "nonexistent" not found`) {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }

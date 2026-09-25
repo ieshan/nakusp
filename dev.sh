@@ -140,6 +140,110 @@ cmd_ci() {
     log_info "CI pipeline passed."
 }
 
+cmd_upgrade() {
+    local mode="${1:-minor}"
+    local get_flag="-u"
+
+    if [[ "$mode" == "patch" ]]; then
+        get_flag="-u=patch"
+        log_info "Upgrading dependencies (patch only) in all modules..."
+    else
+        log_info "Upgrading dependencies (direct + indirect) in all modules..."
+    fi
+
+    for mod in "${MODULES[@]}"; do
+        log_info "  -> upgrading $mod"
+        (cd "$mod" && go get "$get_flag" ./... && go mod tidy -go=1.27)
+    done
+
+    go work sync
+    log_info "Upgrade complete. Run './dev.sh ci' to verify."
+}
+
+cmd_release() {
+    local version=""
+    local push=false
+
+    for arg in "$@"; do
+        case "$arg" in
+            --push) push=true ;;
+            *)      version="$arg" ;;
+        esac
+    done
+
+    if [[ -z "$version" ]]; then
+        log_error "Usage: ./dev.sh release <version> [--push]"
+        exit 1
+    fi
+
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log_error "Invalid version '$version' (expected semver like 1.0.14)"
+        exit 1
+    fi
+
+    # Guard: clean working tree (staged, unstaged, untracked)
+    if [[ -n "$(git status --porcelain)" ]]; then
+        log_error "Working tree has uncommitted changes. Commit or stash first."
+        exit 1
+    fi
+
+    # Guard: no replace directives in the root module — they break downstream
+    # consumers. Submodule ../../ replaces are dev-only and ignored by consumers.
+    local replaces
+    replaces=$(grep -l '^replace ' go.mod 2>/dev/null || true)
+    if [[ -n "$replaces" ]]; then
+        log_error "replace directives found, remove before release:"
+        echo "$replaces"
+        exit 1
+    fi
+
+    # Build the tag list: root -> vX.Y.Z, submodule -> <path>/vX.Y.Z
+    local tags=()
+    for mod in "${MODULES[@]}"; do
+        local prefix="${mod#./}"
+        if [[ "$prefix" == "." ]]; then
+            tags+=("v$version")
+        else
+            tags+=("$prefix/v$version")
+        fi
+    done
+
+    # Guard: none of the tags may already exist (local or remote)
+    local remote_tags=""
+    remote_tags=$(git ls-remote --tags origin 2>/dev/null | awk '{print $2}' | sed 's|refs/tags/||' || true)
+
+    local existing=()
+    for tag in "${tags[@]}"; do
+        if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
+            existing+=("$tag (local)")
+        elif grep -qx "$tag" <<<"$remote_tags"; then
+            existing+=("$tag (remote)")
+        fi
+    done
+
+    if [[ ${#existing[@]} -gt 0 ]]; then
+        log_error "These tags already exist:"
+        printf '  %s\n' "${existing[@]}"
+        exit 1
+    fi
+
+    log_info "Release v$version will create tags:"
+    printf '  %s\n' "${tags[@]}"
+
+    if ! $push; then
+        log_warn "Dry run — no tags created. Re-run with --push to create and push."
+        exit 0
+    fi
+
+    for tag in "${tags[@]}"; do
+        git tag "$tag"
+        log_info "  tagged $tag"
+    done
+
+    git push origin "${tags[@]}"
+    log_info "Release v$version pushed."
+}
+
 cmd_help() {
     cat <<EOF
 Usage: ./dev.sh <command>
@@ -155,6 +259,9 @@ Commands:
   vet         Run 'go vet' in all modules
   clean       Clean Go caches and remove generated files
   ci          Run vet + build + test (full CI simulation)
+  upgrade     Upgrade all dependencies (direct + indirect) to latest
+  upgrade-patch Upgrade dependencies to latest patch versions only
+  release <v> [--push]  Tag all modules as v<v> (dry run without --push)
   help        Show this help message
 
 Modules managed:
@@ -181,6 +288,9 @@ main() {
         vet)              cmd_vet ;;
         clean)            cmd_clean ;;
         ci)               cmd_ci ;;
+        upgrade)          cmd_upgrade minor ;;
+        upgrade-patch)    cmd_upgrade patch ;;
+        release)          shift; cmd_release "$@" ;;
         help|--help|-h)   cmd_help ;;
         *)
             log_error "Unknown command: $1"

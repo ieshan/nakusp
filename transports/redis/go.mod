@@ -1,6 +1,6 @@
 module github.com/ieshan/nakusp/transports/redis
 
-go 1.26
+go 1.27
 
 replace github.com/ieshan/nakusp => ../../
 
@@ -13,6 +13,6 @@ require (
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/oklog/ulid/v2 v2.1.2 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )

@@ -7,7 +7,7 @@ Nakusp is a flexible and extensible background job processing system written in 
 - **Multiple Transport Backends**: Choose from in-memory (FakeTransport), Redis, or SQLite with opt-in dependencies
 - **Scheduled Tasks**: Built-in cron-like scheduling with efficient timer-based execution
 - **Retry Logic**: Configurable retry counts with automatic Dead Letter Queue (DLQ) support
-- **Graceful Shutdown**: Signal-based shutdown with configurable timeout
+- **Graceful Shutdown**: Context-based graceful shutdown with a configurable `GracefulTimeout`
 - **Concurrent Processing**: Worker pool with configurable concurrency
 - **Type-Safe**: Strongly typed job handlers and configuration
 
@@ -25,20 +25,20 @@ The system is composed of two main components:
 
 ### Built-in Transports
 
-Nakusp comes with three production-ready transports. The root module includes only `FakeTransport` (zero dependencies). Redis and SQLite transports live in separate submodules so you only pull in the dependencies you need.
+Nakusp comes with three transports. The root module includes only `FakeTransport` (zero dependencies). Redis and SQLite transports live in separate submodules so you only pull in the dependencies you need.
 
 *   **FakeTransport** (root module `github.com/ieshan/nakusp`): An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
 
 *   **RedisTransport** (submodule `github.com/ieshan/nakusp/transports/redis`): A production-grade transport using Redis lists and Lua scripts for atomic operations. Features include:
-    *   Atomic job consuming with distributed locking
+    *   Atomic job claiming with distributed locking — claimed-but-undelivered jobs are requeued on shutdown
     *   Worker heartbeat tracking with automatic expiration
-    *   Configurable polling intervals (200ms default for consuming)
+    *   200ms poll interval for consuming; batch claiming in `ConsumeAll`
     *   Support for Dead Letter Queue (DLQ) for failed jobs
 
 *   **SQLiteTransport** (submodule `github.com/ieshan/nakusp/transports/sqlite`): A persistent transport using SQLite for local job storage. Features include:
-    *   Transaction-based job locking to prevent duplicate processing
-    *   Configurable heartbeat (30s) and consume (250ms) intervals
-    *   Automatic job expiration and worker health monitoring
+    *   Atomic job claiming (single-statement `UPDATE ... RETURNING`) prevents duplicate processing in both `Consume` and `ConsumeAll`
+    *   Configurable heartbeat (5m) and fetch (5s) intervals
+    *   Job claims carry `locked_until` leases and worker heartbeats are tracked in a `workers` table
     *   Suitable for single-node deployments or development environments
 
 ### Transport Interface
@@ -50,22 +50,23 @@ type Transport interface {
     Publish(ctx context.Context, job *Job) error
     Heartbeat(ctx context.Context, id idx.ID) error  // Blocks until context cancelled
     Consume(ctx context.Context, id idx.ID, jobQueue chan *Job) error  // Blocks until context cancelled
-    ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *Job) error
+    ConsumeAll(ctx context.Context, id idx.ID, jobQueue chan *Job) error  // Closes jobQueue when done
     Requeue(ctx context.Context, job *Job) error
     SendToDLQ(ctx context.Context, job *Job) error
     Completed(ctx context.Context, job *Job) error
+    Close(ctx context.Context) error
 }
 ```
 
 The `Heartbeat` and `Consume` methods are designed to run as long-lived goroutines, blocking until the context is cancelled. This design allows each transport to control its own execution cadence without requiring the core system to manage timing logic.
 
-The `ConsumeAll` method is designed for batch processing scenarios where you want to process all currently queued jobs and then exit. Unlike `Consume`, which runs continuously, `ConsumeAll` fetches all available jobs, sends them to the job queue, closes the channel, and returns once all jobs have been processed.
+The `ConsumeAll` method is designed for batch processing scenarios where you want to process all currently queued jobs and then exit. Unlike `Consume`, which runs continuously, `ConsumeAll` fetches all available jobs, sends them to the job queue, closes the channel, and returns. On the `Nakusp` side, `ConsumeAll` additionally waits for every dispatched handler to finish before returning the transport's error.
 
 ## Getting Started
 
 ### Prerequisites
 
-*   Go 1.26 or later
+*   Go 1.27 or later
 *   Docker and Docker Compose
 
 ### Installation
@@ -88,13 +89,16 @@ The `ConsumeAll` method is designed for batch processing scenarios where you wan
 To run the tests, you can use the provided `dev.sh` script:
 
 ```sh
-# Run all tests locally (root, redis, and sqlite modules)
+# Run all tests locally (root and sqlite modules; redis skips without REDIS_URI)
 ./dev.sh test
 
-# Run tests in Docker with a Redis instance
+# Run all module tests in Docker against a Redis-compatible backend (Dragonfly)
 ./dev.sh test-docker
 
-# Run the full CI pipeline
+# Run only the Redis transport tests in Docker
+./dev.sh test-redis-only
+
+# Run the full CI pipeline (vet + build + test)
 ./dev.sh ci
 ```
 
@@ -131,10 +135,10 @@ func main() {
 	n.AddHandler("my-task", handler)
 
 	// Start a worker
-	go n.StartWorker(nakusp.DefaultTransport)
+	go n.StartWorker(context.Background(), nakusp.DefaultTransport)
 
 	// Publish a job
-	if err := n.Publish(context.Background(), "my-task", "hello, world!"); err != nil {
+	if _, err := n.Publish(context.Background(), "my-task", "hello, world!"); err != nil {
 		panic(err)
 	}
 
@@ -153,7 +157,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -197,17 +200,15 @@ func main() {
 		panic(err)
 	}
 
-	// Start the worker (scheduler will start automatically)
-	go func() {
-		if err := n.StartWorker(nakusp.DefaultTransport); err != nil {
-			fmt.Printf("Worker error: %v\n", err)
-		}
-	}()
+	// Start the worker (scheduler will start automatically).
+	// The worker blocks until the context is cancelled, then drains
+	// in-flight jobs up to Config.GracefulTimeout.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	// Wait for interrupt signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	if err := n.StartWorker(ctx, nakusp.DefaultTransport); err != nil {
+		fmt.Printf("Worker error: %v\n", err)
+	}
 
 	fmt.Println("Shutting down...")
 }
@@ -263,15 +264,15 @@ func main() {
 	n.AddHandler("my-task", handler)
 
 	// Publish some jobs
-	if err := n.Publish(context.Background(), "my-task", "hello, world!"); err != nil {
+	if _, err := n.Publish(context.Background(), "my-task", "hello, world!"); err != nil {
 		panic(err)
 	}
-	if err := n.Publish(context.Background(), "my-task", "another job"); err != nil {
+	if _, err := n.Publish(context.Background(), "my-task", "another job"); err != nil {
 		panic(err)
 	}
 
 	// Consume all jobs and exit
-	if err := n.ConsumeAll(nakusp.DefaultTransport); err != nil {
+	if err := n.ConsumeAll(context.Background(), nakusp.DefaultTransport); err != nil {
 		panic(err)
 	}
 }
@@ -288,8 +289,11 @@ Nakusp uses a Go workspace for local multi-module development.
 # Run all tests locally
 ./dev.sh test
 
-# Run tests in Docker (includes Redis integration tests)
+# Run all module tests in Docker (includes Redis-compatible integration tests)
 ./dev.sh test-docker
+
+# Run only the Redis transport tests in Docker
+./dev.sh test-redis-only
 
 # Run the full CI pipeline
 ./dev.sh ci
@@ -309,7 +313,7 @@ The `RedisTransport` uses Redis as a backend and is suitable for production envi
 
 ```go
 import (
-	redis "github.com/ieshan/nakusp/transports/redis"
+	nakuspredis "github.com/ieshan/nakusp/transports/redis"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -319,7 +323,7 @@ redisClient := redis.NewClient(&redis.Options{
 	Addr: "localhost:6379",
 })
 
-redisTransport := redis.NewRedis(redisClient, nil, nil)
+redisTransport := nakuspredis.NewRedis(redisClient, nil, nil)
 
 // ...
 ```
@@ -339,4 +343,20 @@ if err != nil {
 }
 
 // ...
+```
+
+### Routing Tasks to Transports
+
+By default every task publishes to the `"default"` transport. Use `BindTransport` to route a task to a different named transport — workers started on that transport then consume its jobs:
+
+```go
+n := nakusp.NewNakusp(nil, map[string]models.Transport{
+	nakusp.DefaultTransport: sqliteTransport,
+	"redis":                 redisTransport,
+})
+
+// Jobs for "urgent-task" are published to the "redis" transport.
+if err := n.BindTransport("urgent-task", "redis"); err != nil {
+	panic(err)
+}
 ```

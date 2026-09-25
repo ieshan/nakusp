@@ -30,6 +30,11 @@ func TestRedisTransport(t *testing.T) {
 	}
 
 	buildTransport := func(t *testing.T) models.Transport {
+		// Flush per subtest — Publish/Requeue leave entries in the todo queue
+		// that would otherwise leak into later subtests.
+		if err := client.FlushAll(context.Background()).Err(); err != nil {
+			t.Fatalf("failed to flush redis: %v", err)
+		}
 		return NewRedis(client, nil, nil)
 	}
 

@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -193,6 +195,77 @@ func TestSQLiteTransport(t *testing.T) {
 
 		for _, job := range jobs {
 			if !receivedJobs[job.ID.String()] {
+				t.Errorf("job with ID %s was not consumed", job.ID)
+			}
+		}
+	})
+
+	t.Run("sqlite_consumeall_no_double_delivery", func(t *testing.T) {
+		// Two transports on one file-backed db (:memory: won't share across handles).
+		dsn := fmt.Sprintf("file:%s?_busy_timeout=5000", filepath.Join(t.TempDir(), "test.db"))
+		newTransport := func() *SQLiteTransport {
+			transport, err := NewSQLite(dsn, &SQLiteConfig{HeartbeatInternal: 5 * time.Minute, FetchInterval: 2 * time.Second})
+			if err != nil {
+				t.Fatalf("failed to create sqlite transport: %v", err)
+			}
+			t.Cleanup(func() { _ = transport.Close(context.Background()) })
+			return transport
+		}
+
+		jobs := []*models.Job{
+			{ID: idx.NewID(), Name: "job-1", Payload: "payload-1"},
+			{ID: idx.NewID(), Name: "job-2", Payload: "payload-2"},
+			{ID: idx.NewID(), Name: "job-3", Payload: "payload-3"},
+		}
+
+		publisher := newTransport()
+		for _, job := range jobs {
+			if err := publisher.Publish(ctx, job); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+		}
+
+		type result struct {
+			jobs map[string]bool
+			err  error
+		}
+		consumers := []models.Transport{newTransport(), newTransport()}
+		results := make([]result, len(consumers))
+
+		var wg sync.WaitGroup
+		wg.Add(len(consumers))
+		for i, tr := range consumers {
+			go func(i int, tr models.Transport) {
+				defer wg.Done()
+				jobQueue := make(chan *models.Job, len(jobs))
+				err := tr.ConsumeAll(ctx, idx.NewID(), jobQueue)
+				received := make(map[string]bool)
+				for job := range jobQueue {
+					received[job.ID.String()] = true
+				}
+				results[i] = result{jobs: received, err: err}
+			}(i, tr)
+		}
+		wg.Wait()
+
+		seen := make(map[string]bool)
+		for i, res := range results {
+			if res.err != nil {
+				t.Fatalf("ConsumeAll %d returned error: %v", i, res.err)
+			}
+			for id := range res.jobs {
+				if seen[id] {
+					t.Fatalf("job %s delivered by more than one ConsumeAll", id)
+				}
+				seen[id] = true
+			}
+		}
+
+		if len(seen) != len(jobs) {
+			t.Fatalf("expected %d jobs delivered, got %d", len(jobs), len(seen))
+		}
+		for _, job := range jobs {
+			if !seen[job.ID.String()] {
 				t.Errorf("job with ID %s was not consumed", job.ID)
 			}
 		}

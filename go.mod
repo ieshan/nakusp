@@ -1,6 +1,6 @@
 module github.com/ieshan/nakusp
 
-go 1.26
+go 1.27
 
 require github.com/ieshan/idx v1.3.3
 
