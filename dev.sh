@@ -20,6 +20,7 @@ MODULES=(
     "./transports/redis"
     "./transports/sqlite"
     "./transports/postgres"
+    "./transports/turso"
 )
 
 cmd_setup() {
@@ -35,7 +36,7 @@ cmd_setup() {
     # Always regenerate go.work to handle module list changes
     log_info "Generating Go workspace..."
     rm -f go.work go.work.sum
-    go work init . ./transports/redis ./transports/sqlite ./transports/postgres
+    go work init . ./transports/redis ./transports/sqlite ./transports/postgres ./transports/turso
 
     log_info "Syncing workspace dependencies..."
     go work sync
@@ -281,6 +282,7 @@ Modules managed:
   ./transports/redis         (Redis transport submodule)
   ./transports/sqlite        (SQLite transport submodule)
   ./transports/postgres      (Postgres transport submodule)
+  ./transports/turso         (Turso transport submodule)
 EOF
 }
 
