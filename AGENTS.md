@@ -64,7 +64,7 @@ All quality tools (golangci-lint, gosec, govulncheck, nilaway, shadow, nilness) 
 
 ```bash
 # Run from repo root; committed ../../ replaces resolve to /work/go.mod
-for mod in . ./transports/redis ./transports/sqlite ./transports/postgres; do
+for mod in . ./transports/redis ./transports/sqlite ./transports/postgres ./transports/turso; do
     for tool in "go vet" "shadow" "nilness" "golangci-lint run" "gosec" "govulncheck"; do
         gocheck sh -c "cd /work/$mod && $tool ./..." || echo "FAILED: $tool ($mod)"
     done
@@ -78,11 +78,12 @@ gocheck sh -c 'cd /work && nilaway -include-pkgs="github.com/ieshan/nakusp" ./..
 gocheck sh -c 'cd /work/transports/redis && nilaway -include-pkgs="github.com/ieshan/nakusp/transports/redis" ./...'
 gocheck sh -c 'cd /work/transports/sqlite && nilaway -include-pkgs="github.com/ieshan/nakusp/transports/sqlite" ./...'
 gocheck sh -c 'cd /work/transports/postgres && nilaway -include-pkgs="github.com/ieshan/nakusp/transports/postgres" ./...'
+gocheck sh -c 'cd /work/transports/turso && nilaway -include-pkgs="github.com/ieshan/nakusp/transports/turso" ./...'
 ```
 
 Do NOT `cd` into a submodule on the host before calling `gocheck` — that mounts only the submodule, so `../../` resolves to `/` (outside the repo) and module resolution breaks for both submodules.
 
-The gocheck image pins: golangci-lint v2.13.2, gosec v2.29.0, govulncheck v1.7.0, nilaway, and the `shadow`/`nilness` `go vet` vettools from `golang.org/x/tools` v0.49.0. Bump versions in `/Users/u2/work/docker/tooling/gocheck/Dockerfile` and rebuild with `gocheck rebuild`.
+The gocheck image pins: golangci-lint v2.14.0, gosec v2.29.1-0.20261009120814-7b1b5cebe007 (a master commit — v2.29.0 still bundles x/tools v0.49.0), govulncheck v1.7.0, nilaway v0.0.0-20260918162853-acb8859b9031, and the `shadow`/`nilness` `go vet` vettools from `golang.org/x/tools` v0.51.0. Analyzers need x/tools >= v0.50.0 to decode Go 1.27.2's export data (v5), which is why gosec is on a pseudo-version. Bump versions in `/Users/u2/work/docker/tooling/gocheck/Dockerfile` and rebuild with `gocheck rebuild`.
 
 **Done means**: `./dev.sh ci` passes, new tests added for new behavior, and the `gocheck` quality gates above pass in all modules.
 
@@ -92,6 +93,7 @@ The gocheck image pins: golangci-lint v2.13.2, gosec v2.29.0, govulncheck v1.7.0
 - Redis submodule (`transports/redis`) requires `github.com/redis/go-redis/v9`
 - SQLite submodule (`transports/sqlite`) requires `github.com/mattn/go-sqlite3` (CGO)
 - Postgres submodule (`transports/postgres`) requires `gorm.io/gorm`, `gorm.io/driver/postgres`, and `github.com/ieshan/timi`
+- Turso submodule (`transports/turso`) requires `turso.tech/database/tursogo` (embedded engine via purego FFI — no CGO, no server)
 - Redis integration tests require a running Redis-compatible server (compose uses Dragonfly); set `REDIS_URI` or use `test-redis-only`. `test-docker` only exercises the root module — `./...` does not cross into submodules
 - Postgres integration tests require a running Postgres server (compose uses `postgres:18-alpine`); set `POSTGRES_DSN` or use `test-postgres-only`
 - Submodules carry a committed `replace github.com/ieshan/nakusp => ../../`, so they resolve local code even without `go.work`; the require line pins the released version floor for downstream consumers. `./...` never crosses module boundaries (even with `go.work`), so always loop modules; `./dev.sh setup` creates `go.work`
@@ -117,6 +119,10 @@ The gocheck image pins: golangci-lint v2.13.2, gosec v2.29.0, govulncheck v1.7.0
 ├── transports/postgres/      — submodule (gorm + postgres driver)
 │   ├── go.mod
 │   ├── transport_postgres.go
+│   └── transport_test.go
+├── transports/turso/         — submodule (turso.tech/database/tursogo, no CGO)
+│   ├── go.mod
+│   ├── transport_turso.go
 │   └── transport_test.go
 ├── dev.sh                    — workspace management script
 ├── compose.yml               — Docker Compose for Redis tests
@@ -158,6 +164,15 @@ All transports implement `models.Transport`. Key methods block until context can
 - `PostgresConfig.Logger` (gorm `logger.Interface`) is configurable; nil defaults to silent
 - Timestamps are `timestamptz` via `timi`; both constructors `AutoMigrate` the `jobs`/`workers` tables
 
+### Turso transport specifics
+
+- `turso.tech/database/tursogo` is a `database/sql` driver (registered name `"turso"`); `NewTurso(dsn, cfg)` takes a file path or `:memory:`. No CGO — the engine is a prebuilt Rust lib loaded via purego.
+- `id`/`payload` are `BLOB` columns: Turso `TEXT` must be valid UTF-8 (invalid bytes get U+FFFD-substituted) and `idx.ID`'s `Value()` returns 16-byte binary; `Publish` binds `[]byte(job.Payload)`.
+- MVCC, not locking: `BeginTx` is snapshot isolation, so claims are single autocommit `UPDATE` statements that commit *before* jobs are delivered — holding a tx open across a channel send would make a commit conflict double-deliver. `execClaim` retries on `tursogo.ErrTursoBusy`.
+- `ConsumeAll` claims under a per-call token then selects by it, tracking delivered IDs so a cancel only requeues undelivered jobs (postgres pattern).
+- `db.SetMaxOpenConns(1)` is kept for `:memory:` correctness under `database/sql` pooling and parity with sqlite; MVCC could allow relaxing it for file DBs later.
+- The driver applies a 5000ms `DefaultBusyTimeout` per connection automatically — no `NewConnector`/`WithBusyTimeout` needed.
+
 ## Testing Approach
 
 - Tests are colocated `*_test.go` in each module
@@ -167,6 +182,7 @@ All transports implement `models.Transport`. Key methods block until context can
 - SQLite-specific regression tests:
   - `sqlite_atomic_claim_single_delivery` — verifies only one consumer claims a job
   - `sqlite_dlq_not_requeued` — verifies DLQ jobs are not re-fetched
+- Turso tests need no env var or server; they mirror the sqlite suite plus `turso_binary_payload_roundtrip` (invalid-UTF-8 payloads round-trip byte-exact through the BLOB column) and `turso_consumeall_no_double_delivery` (two handles on one file db under MVCC).
 
 ## Gotchas and Non-Obvious Behaviors
 
@@ -176,6 +192,7 @@ All transports implement `models.Transport`. Key methods block until context can
 - `ExecuteJob` runs bookkeeping (`Requeue`/`Completed`/`SendToDLQ`) on `context.WithoutCancel(ctx)` so a cancelled worker context cannot strand in-flight jobs; missing handlers and handler panics send the job to the DLQ.
 - SQLite transport uses `database/sql` + `mattn/go-sqlite3` (CGO required). SQLite submodule tests will fail if CGO is disabled.
 - Postgres transport tests are Docker-only in practice: they skip without `POSTGRES_DSN`; compose brings up `postgres:18-alpine` with a `pg_isready` healthcheck.
+- Turso transport needs no server and no env gating — `turso.tech/database/tursogo` is an embedded `database/sql` driver (purego FFI, no CGO), so its tests always run like sqlite's.
 - `test-redis-only`/`test-postgres-only` use `compose run --no-deps` after `compose up -d --wait <svc>` — each starts only its own backend, unlike `test-docker` which brings up both.
 - Redis transport's `parseJobPayload` is package-private and used only internally; `GetPayload` is the exported counterpart.
 - Docker Compose mounts `./:/app` and generates its own `go.work` inside the container. Running compose does not require host `./dev.sh setup`.
@@ -186,11 +203,12 @@ All transports implement `models.Transport`. Key methods block until context can
 2. If touching `transports/redis`, run `./dev.sh test-redis-only` or `(cd transports/redis && go test -v ./...)` with `REDIS_URI` set.
 3. If touching `transports/sqlite`, run `(cd transports/sqlite && go test -v ./...)`.
 4. If touching `transports/postgres`, run `./dev.sh test-postgres-only` or `(cd transports/postgres && go test -v ./...)` with `POSTGRES_DSN` set.
-5. If adding a new transport submodule:
+5. If touching `transports/turso`, run `(cd transports/turso && go test -v ./...)` — embedded engine, nothing else needed.
+6. If adding a new transport submodule:
    - Create `transports/<name>/go.mod` with `replace github.com/ieshan/nakusp => ../../` (local dev) and pin `require github.com/ieshan/nakusp` to the latest released version (the floor for downstream consumers — the release guard only checks the root go.mod)
    - Update `dev.sh` MODULES array
    - Update `compose.yml` command to include the new module in `go work init`
    - Run `./dev.sh setup` to regenerate `go.work`
-6. Keep interface assertions and error wrapping style consistent across all transports.
-7. Never add external dependencies to the root `go.mod` — they belong in the relevant transport submodule.
-8. Before finishing, run the `gocheck` quality gates (see "Code Quality Checks") in every module touched.
+7. Keep interface assertions and error wrapping style consistent across all transports.
+8. Never add external dependencies to the root `go.mod` — they belong in the relevant transport submodule.
+9. Before finishing, run the `gocheck` quality gates (see "Code Quality Checks") in every module touched.

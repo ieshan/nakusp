@@ -25,7 +25,7 @@ The system is composed of two main components:
 
 ### Built-in Transports
 
-Nakusp comes with four transports. The root module includes only `FakeTransport` (zero dependencies). Redis, SQLite, and Postgres transports live in separate submodules so you only pull in the dependencies you need.
+Nakusp comes with five transports. The root module includes only `FakeTransport` (zero dependencies). Redis, SQLite, Postgres, and Turso transports live in separate submodules so you only pull in the dependencies you need.
 
 *   **FakeTransport** (root module `github.com/ieshan/nakusp`): An in-memory transport ideal for testing. It simulates blocking behavior without external dependencies, making it perfect for unit tests.
 
@@ -46,6 +46,12 @@ Nakusp comes with four transports. The root module includes only `FakeTransport`
     *   Two constructors: `NewPostgres(dsn, cfg)` opens its own pool; `NewPostgresFromDB(db, cfg)` reuses an existing `*gorm.DB`
     *   Configurable heartbeat, fetch, and lock durations; pluggable gorm logger (silent by default)
     *   Claimed-but-undelivered jobs are requeued on shutdown
+
+*   **TursoTransport** (submodule `github.com/ieshan/nakusp/transports/turso`): A persistent transport using the embedded Turso database engine (SQLite-compatible, **no CGO required**). Features include:
+    *   Drop-in alternative to SQLiteTransport without the CGO dependency — ideal for cross-compilation and minimal containers
+    *   Atomic job claiming that commits before delivery — safe under Turso's MVCC concurrency model
+    *   Binary-safe `BLOB` storage for job IDs and payloads
+    *   Suitable for single-node deployments or development environments
 
 ### Transport Interface
 
@@ -95,7 +101,7 @@ The `ConsumeAll` method is designed for batch processing scenarios where you wan
 To run the tests, you can use the provided `dev.sh` script:
 
 ```sh
-# Run all tests locally (root and sqlite modules; redis skips without REDIS_URI, postgres skips without POSTGRES_DSN)
+# Run all tests locally (root, sqlite, and turso modules run in-process; redis skips without REDIS_URI, postgres skips without POSTGRES_DSN)
 ./dev.sh test
 
 # Run all module tests in Docker against Redis-compatible (Dragonfly) and Postgres backends
@@ -372,6 +378,23 @@ if err != nil {
 
 // Option 2: reuse an existing *gorm.DB (the transport will not close it).
 postgresTransport, err = nakusppostgres.NewPostgresFromDB(existingDB, nil)
+if err != nil {
+	panic(err)
+}
+
+// ...
+```
+
+### TursoTransport
+
+The `TursoTransport` provides a persistent job queue using the embedded [Turso](https://turso.tech) database engine. It speaks SQLite's dialect and file format but is written in Rust and loaded via purego — no CGO required, which makes cross-compilation and minimal container images painless.
+
+```go
+import turso "github.com/ieshan/nakusp/transports/turso"
+
+// ...
+
+tursoTransport, err := turso.NewTurso("/path/to/your.db", nil)
 if err != nil {
 	panic(err)
 }

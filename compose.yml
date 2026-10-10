@@ -1,6 +1,6 @@
 services:
   test:
-    image: golang:1.27.1-trixie
+    image: golang:1.27.2-trixie
     working_dir: /app
     volumes:
       - "./:/app"
@@ -14,13 +14,13 @@ services:
     command:
       - "sh"
       - "-c"
-      - "rm -f go.work go.work.sum && go work init . ./transports/redis ./transports/sqlite ./transports/postgres && go mod download && for mod in . ./transports/redis ./transports/sqlite ./transports/postgres; do (cd $$mod && go test -v ./...) || exit 1; done"
+      - "rm -f go.work go.work.sum && go work init . ./transports/redis ./transports/sqlite ./transports/postgres ./transports/turso && go mod download && for mod in . ./transports/redis ./transports/sqlite ./transports/postgres ./transports/turso; do (cd $$mod && go test -v ./...) || exit 1; done"
     stop_signal: SIGINT
     environment:
       REDIS_URI: "redis://redis:6379/0"
       POSTGRES_DSN: "postgres://postgres@postgres:5432/nakusp?sslmode=disable"
   redis:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.0
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2
     ulimits:
       memlock: -1
     networks:

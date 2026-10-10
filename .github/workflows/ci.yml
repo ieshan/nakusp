@@ -26,6 +26,7 @@ jobs:
           - { name: redis,    dir: "transports/redis" }
           - { name: sqlite,   dir: "transports/sqlite" }
           - { name: postgres, dir: "transports/postgres" }
+          - { name: turso,    dir: "transports/turso" }
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -35,14 +36,17 @@ jobs:
         with:
           # Each module's go.mod is the source of truth for its Go version.
           go-version-file: ${{ matrix.module.dir }}/go.mod
+          # Bypass the runner's tool cache so `go 1.27` always resolves to the
+          # newest patch (1.27.2), matching the gocheck image's Go.
+          check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.module.dir }}/go.sum
 
-      # Pinned to v2.13.2 to match the gocheck image (AGENTS.md).
+      # Pinned to v2.14.0 to match the gocheck image (AGENTS.md).
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           working-directory: ${{ matrix.module.dir }}
 
   test:
@@ -56,6 +60,7 @@ jobs:
           - { name: redis,    dir: "transports/redis" }
           - { name: sqlite,   dir: "transports/sqlite" }
           - { name: postgres, dir: "transports/postgres" }
+          - { name: turso,    dir: "transports/turso" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -93,6 +98,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module.dir }}/go.mod
+          # Bypass the runner's tool cache so `go 1.27` always resolves to the
+          # newest patch (1.27.2), matching the gocheck image's Go.
+          check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.module.dir }}/go.sum
 
@@ -118,10 +126,11 @@ jobs:
 
       # shadow and nilness are the two extra analyzers AGENTS.md requires
       # beyond standard `go vet`, pinned to the gocheck image's x/tools.
+      # x/tools >= v0.50.0 is required to decode Go 1.27.2's export data (v5).
       - name: Install shadow and nilness analyzers
         run: |
-          go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow@v0.49.0
-          go install golang.org/x/tools/go/analysis/passes/nilness/cmd/nilness@v0.49.0
+          go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow@v0.51.0
+          go install golang.org/x/tools/go/analysis/passes/nilness/cmd/nilness@v0.51.0
 
       - name: Vet (shadow)
         run: go vet -vettool="$(go env GOPATH)/bin/shadow" ./...
@@ -143,6 +152,7 @@ jobs:
           - { name: redis,    dir: "transports/redis" }
           - { name: sqlite,   dir: "transports/sqlite" }
           - { name: postgres, dir: "transports/postgres" }
+          - { name: turso,    dir: "transports/turso" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -175,6 +185,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module.dir }}/go.mod
+          # Bypass the runner's tool cache so `go 1.27` always resolves to the
+          # newest patch (1.27.2), matching the gocheck image's Go.
+          check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.module.dir }}/go.sum
 
@@ -206,6 +219,7 @@ jobs:
           - { name: redis,    dir: "transports/redis" }
           - { name: sqlite,   dir: "transports/sqlite" }
           - { name: postgres, dir: "transports/postgres" }
+          - { name: turso,    dir: "transports/turso" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -217,6 +231,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module.dir }}/go.mod
+          # Bypass the runner's tool cache so `go 1.27` always resolves to the
+          # newest patch (1.27.2), matching the gocheck image's Go.
+          check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.module.dir }}/go.sum
 
@@ -229,7 +246,9 @@ jobs:
       - name: govulncheck
         run: govulncheck ./...
 
-  # Pinned to v2.29.0 to match the gocheck image (AGENTS.md).
+  # Pinned to a master commit to match the gocheck image (AGENTS.md):
+  # v2.29.0 still bundles x/tools v0.49.0, which cannot decode Go 1.27.2's
+  # export data (v5).
   gosec:
     name: gosec (${{ matrix.module.name }})
     runs-on: ubuntu-latest
@@ -241,6 +260,7 @@ jobs:
           - { name: redis,    dir: "transports/redis" }
           - { name: sqlite,   dir: "transports/sqlite" }
           - { name: postgres, dir: "transports/postgres" }
+          - { name: turso,    dir: "transports/turso" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -252,6 +272,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module.dir }}/go.mod
+          # Bypass the runner's tool cache so `go 1.27` always resolves to the
+          # newest patch (1.27.2), matching the gocheck image's Go.
+          check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.module.dir }}/go.sum
 
@@ -259,7 +282,7 @@ jobs:
         run: go mod download
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261009120814-7b1b5cebe007
 
       - name: gosec
         run: gosec ./...
@@ -277,6 +300,7 @@ jobs:
           - { name: redis,    dir: "transports/redis",    pkg: "github.com/ieshan/nakusp/transports/redis" }
           - { name: sqlite,   dir: "transports/sqlite",   pkg: "github.com/ieshan/nakusp/transports/sqlite" }
           - { name: postgres, dir: "transports/postgres", pkg: "github.com/ieshan/nakusp/transports/postgres" }
+          - { name: turso,    dir: "transports/turso",    pkg: "github.com/ieshan/nakusp/transports/turso" }
     defaults:
       run:
         working-directory: ${{ matrix.module.dir }}
@@ -288,14 +312,19 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module.dir }}/go.mod
+          # Bypass the runner's tool cache so `go 1.27` always resolves to the
+          # newest patch (1.27.2), matching the gocheck image's Go.
+          check-latest: true
           cache: true
           cache-dependency-path: ${{ matrix.module.dir }}/go.sum
 
       - name: Download modules
         run: go mod download
 
+      # nilaway has no tagged releases; pinned to the same commit pseudo-version
+      # as the gocheck image so CI and the local gate cannot diverge.
       - name: Install NilAway
-        run: go install go.uber.org/nilaway/cmd/nilaway@latest
+        run: go install go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260918162853-acb8859b9031
 
       - name: NilAway
         run: nilaway -include-pkgs="${{ matrix.module.pkg }}" ./...
