@@ -83,7 +83,7 @@ gocheck sh -c 'cd /work/transports/turso && nilaway -include-pkgs="github.com/ie
 
 Do NOT `cd` into a submodule on the host before calling `gocheck` — that mounts only the submodule, so `../../` resolves to `/` (outside the repo) and module resolution breaks for both submodules.
 
-The gocheck image pins: golangci-lint v2.13.2, gosec v2.29.0, govulncheck v1.7.0, nilaway, and the `shadow`/`nilness` `go vet` vettools from `golang.org/x/tools` v0.49.0. Bump versions in `/Users/u2/work/docker/tooling/gocheck/Dockerfile` and rebuild with `gocheck rebuild`.
+The gocheck image pins: golangci-lint v2.14.0, gosec v2.29.1-0.20261009120814-7b1b5cebe007 (a master commit — v2.29.0 still bundles x/tools v0.49.0), govulncheck v1.7.0, nilaway v0.0.0-20260918162853-acb8859b9031, and the `shadow`/`nilness` `go vet` vettools from `golang.org/x/tools` v0.51.0. Analyzers need x/tools >= v0.50.0 to decode Go 1.27.2's export data (v5), which is why gosec is on a pseudo-version. Bump versions in `/Users/u2/work/docker/tooling/gocheck/Dockerfile` and rebuild with `gocheck rebuild`.
 
 **Done means**: `./dev.sh ci` passes, new tests added for new behavior, and the `gocheck` quality gates above pass in all modules.
 
